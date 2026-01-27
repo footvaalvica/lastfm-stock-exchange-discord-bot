@@ -9,61 +9,69 @@ def calculate_user_money_sum(user):
     user_entry = users_table.get(Query().username == user.get_name())
     user_money_sum = user_entry['money']
     last_updated = user_entry['last_updated']
-    user_tracks = user_entry['user_tracks']
+    user_scrobbles = user_entry['user_scrobbles']
 
-    daily_tracks = user.get_recent_tracks(now_playing=False, limit=None, time_from=last_updated)
+    daily_scrobbles = user.get_recent_tracks(now_playing=False, limit=None, time_from=last_updated)
     users_table.update({'last_updated': timestamp}, Query().username == user.get_name())
 
-    if not daily_tracks:
+    if not daily_scrobbles:
         return user_money_sum
     
-    for track in daily_tracks:
-        print(f"Processing track: {track.track.artist.name} - {track.track.title}")
-        artist = track.track.artist
+    for scrobble in daily_scrobbles:
+        print(f"Processing track: {scrobble.track}")
+        artist = scrobble.track.artist
         popularity = int(artist.get_listener_count())
 
         # Check if we have an entry for this artist on this date
         ArtistInfo = Query()
-        artist_popularity_entry = artist_popularity_table.search((ArtistInfo.artist_name == artist.name))
+        artist_popularity_entry = artist_popularity_table.search((ArtistInfo.artist_name == artist.name) & (ArtistInfo.timestamp == timestamp))
         
-        # if we don't have an entry for this artist, create one
+        # if we don't have an entry for this artist on this date, create one
         if not artist_popularity_entry:
             artist_popularity_table.insert({
                 'artist_name': artist.name,
                 'popularity': popularity,
                 'timestamp': timestamp
             })
-        
-        # get the closest matching entry for this track date
+            
+            # get all entries for this artist from all users
+            all_user_entries = users_table.search(Query().username.exists())
+            for user_entry in all_user_entries:
+                user_scrobbles = user_entry['user_scrobbles']
+                updated_scrobbles = []
+                user_money_sum = user_entry['money']
+                for scrobble_info in user_scrobbles:
+                    scrobble_artist, scrobble_title, scrobble_album, _, scrobble_timestamp, original_scrobble_popularity = scrobble_info
+                    if scrobble_artist == artist.name:
+                        new_popularity_difference = popularity - original_scrobble_popularity + 1
+                        user_money_sum += new_popularity_difference
+                        updated_scrobbles.append((scrobble_artist, scrobble_title, scrobble_album, new_popularity_difference, scrobble_timestamp, original_scrobble_popularity))
+                    else:
+                        updated_scrobbles.append(scrobble_info)
+                users_table.update({'user_scrobbles': updated_scrobbles, 'money': user_money_sum}, Query().username == user_entry['username'])
+            print(f"Updated all previous scrobbles for artist {artist.name} for all users.")
+            
+        scrobble_timestamp = datetime.fromtimestamp(int(scrobble.timestamp)).date().isoformat().replace('-', '')
+        print(f"Track timestamp: {scrobble_timestamp}, Last updated: {last_updated}, Current timestamp: {timestamp}")
+
+        # get the closest matching entry for this track timestamp
         artist_popularity_entries = artist_popularity_table.search(ArtistInfo.artist_name == artist.name)
-        artist_popularity_entry = max(artist_popularity_entries, key=lambda x: x['timestamp'] <= timestamp)
+        artist_popularity_entry = min(artist_popularity_entries, key=lambda x: abs(int(x['timestamp']) - int(scrobble_timestamp)))
         popularity_difference = popularity - artist_popularity_entry['popularity'] + 1
         user_money_sum += popularity_difference
         users_table.update({'money': user_money_sum}, Query().username == user.get_name())
 
-        if track.track.get_album() is not None:
-            album_title = track.track.get_album().title
+        if scrobble.track.get_album() is not None:
+            album_title = scrobble.track.get_album().title
         else:
             album_title = "Single"
-        user_tracks.append((track.track.artist.name, track.track.title, album_title, popularity_difference))
+        user_scrobbles.append((scrobble.track.artist.name, scrobble.track.title, album_title, popularity_difference, scrobble_timestamp, popularity))
     
-    users_table.update({'user_tracks': user_tracks}, Query().username == user.get_name())
+    users_table.update({'user_scrobbles': user_scrobbles}, Query().username == user.get_name())
     
     print(artist_popularity_table.all())
     print(users_table.all())
     return user_money_sum
-
-def populate_artist_initial_popularity():
-    top_artists = network.get_top_artists(limit=100)
-    for artist in top_artists:
-        artist_name = artist.item.name
-        popularity = int(artist.item.get_listener_count())
-        print(f"Populating {artist_name} with listener count {popularity} in {datetime.now().date().isoformat().replace('-', '')}")
-        artist_popularity_table.insert({
-            'artist_name': artist_name,
-            'popularity': popularity,
-            'timestamp': datetime.now().date().isoformat().replace('-', '')
-        })
 
 def required_env(name):
     value = os.getenv(name)
@@ -81,9 +89,6 @@ network = pylast.LastFMNetwork(
 )
 
 artist_popularity_table = db.table('artist_popularity')
-# # if artist_popularity_table.all() == []:
-# #     populate_artist_initial_popularity()
-
 users_table = db.table('users')
 starting_time = 1769385600
 
@@ -105,6 +110,7 @@ async def on_message(message):
         if not user_entry:
             await message.channel.send(f"{message.author.name}, set up your account first by setting your Last.fm username.")
             return
+        print(f"Fetching money for user: {message.author.name}")
         user = network.get_user(user_entry['lastfm_username'])
         user_money_sum = calculate_user_money_sum(user)
         await message.channel.send(f"{message.author.name}, your total money is: {user_money_sum}")
@@ -129,38 +135,38 @@ async def on_message(message):
                 'lastfm_username': lastfm_username,
                 'money': 0,
                 'last_updated': starting_time,
-                'user_tracks': []
+                'user_scrobbles': []
             })
             await message.channel.send(f"{message.author.name}, your Last.fm username has been set to {lastfm_username}.")
         except IndexError:
             await message.channel.send("Please provide a Last.fm username.")
 
-    if message.content.startswith('!tracks'):
+    if message.content.startswith('!scrobbles'):
         user_entry = users_table.get(Query().username == message.author.name)
         if not user_entry:
             await message.channel.send(f"{message.author.name}, set up your account first by setting your Last.fm username.")
             return
-        user_tracks = user_entry['user_tracks']
-        if not user_tracks:
-            await message.channel.send(f"{message.author.name}, you have no recorded tracks yet.")
+        user_scrobbles = user_entry['user_scrobbles']
+        if not user_scrobbles:
+            await message.channel.send(f"{message.author.name}, you have no recorded scrobbles yet.")
             return
-        tracks_message = "Your recorded tracks:\n"
-        for artist, title, album, money in user_tracks:
-                tracks_message += f"{artist} - {title} ({album}) [{money}€]\n"
-        await message.channel.send(tracks_message)
+        scrobbles_message = "Your recorded scrobbles:\n"
+        for artist, title, album, money in user_scrobbles:
+                scrobbles_message += f"{artist} - {title} ({album}) [{money}€]\n"
+        await message.channel.send(scrobbles_message)
 
-    if message.content.startswith('!albumtracks'):
-        # group tracks by album and sum their money
+    if message.content.startswith('!albumscrobbles'):
+        # group scrobbles by album and sum their money
         user_entry = users_table.get(Query().username == message.author.name)
         if not user_entry:
             await message.channel.send(f"{message.author.name}, set up your account first by setting your Last.fm username.")
             return
-        user_tracks = user_entry['user_tracks']
-        if not user_tracks:
-            await message.channel.send(f"{message.author.name}, you have no recorded tracks yet.")
+        user_scrobbles = user_entry['user_scrobbles']
+        if not user_scrobbles:
+            await message.channel.send(f"{message.author.name}, you have no recorded scrobbles yet.")
             return
         album_dict = {}
-        for artist, title, album, money in user_tracks:
+        for artist, title, album, money in user_scrobbles:
             if album != "Single":
                 if album not in album_dict:
                     album_dict[album] = {
@@ -173,17 +179,17 @@ async def on_message(message):
             album_message += f"{info['artist']} - {album} [{info['total_money']}€]\n"
         await message.channel.send(album_message)
 
-    if message.content.startswith('!artisttracks'):
+    if message.content.startswith('!artistscrobbles'):
         user_entry = users_table.get(Query().username == message.author.name)
         if not user_entry:
             await message.channel.send(f"{message.author.name}, set up your account first by setting your Last.fm username.")
             return
-        user_tracks = user_entry['user_tracks']
-        if not user_tracks:
-            await message.channel.send(f"{message.author.name}, you have no recorded tracks yet.")
+        user_scrobbles = user_entry['user_scrobbles']
+        if not user_scrobbles:
+            await message.channel.send(f"{message.author.name}, you have no recorded scrobbles yet.")
             return
         artist_dict = {}
-        for artist, title, album, money in user_tracks:
+        for artist, title, album, money in user_scrobbles:
             if artist not in artist_dict:
                 artist_dict[artist] = {
                     'total_money': 0,
@@ -192,6 +198,19 @@ async def on_message(message):
         artist_message = "Your recorded artists:\n"
         for artist, info in artist_dict.items():
             artist_message += f"{artist} [{info['total_money']}€]\n"
-        await message.channel.send(artist_message)    
+        await message.channel.send(artist_message)
+
+    if message.content.startswith('!help'):
+        help_message = (
+            "Available commands:\n"
+            "!setlastfm <username> - Set your Last.fm username\n"
+            "!money - Check your total money\n"
+            "!leaderboard - View the leaderboard\n"
+            "!scrobbles - View your recorded scrobbles\n"
+            "!albumscrobbles - View your recorded albums and their total money\n"
+            "!artistscrobbles - View your recorded artists and their total money\n"
+            "!help - Show this help message"
+        )
+        await message.channel.send(help_message)
 
 client.run(required_env("DISCORD_TOKEN"))
