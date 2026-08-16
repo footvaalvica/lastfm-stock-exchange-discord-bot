@@ -5,20 +5,24 @@ from datetime import datetime
 from tinydb import TinyDB, Query
 
 def calculate_user_money_sum(user):
-    timestamp = datetime.now().date().isoformat().replace('-', '')
+    time = datetime.now()
+    timestamp = time.date().isoformat().replace('-', '')
+    unix_timestamp = int(time.timestamp())
+
     user_entry = users_table.get(Query().username == user.get_name())
     user_money_sum = user_entry['money']
     last_updated = user_entry['last_updated']
     user_scrobbles = user_entry['user_scrobbles']
 
-    daily_scrobbles = user.get_recent_tracks(now_playing=False, limit=None, time_from=last_updated)
-    users_table.update({'last_updated': timestamp}, Query().username == user.get_name())
+    daily_scrobbles = user.get_recent_tracks(now_playing=False, limit=50)#, time_from=last_updated)
+    users_table.update({'last_updated': unix_timestamp}, Query().username == user.get_name())
 
     if not daily_scrobbles:
         return user_money_sum
     
     for scrobble in daily_scrobbles:
-        print(f"Processing track: {scrobble.track}")
+        print(f"scrobble.track{scrobble.track}")
+
         artist = scrobble.track.artist
         popularity = int(artist.get_listener_count())
 
@@ -34,7 +38,7 @@ def calculate_user_money_sum(user):
                 'timestamp': timestamp
             })
             
-            # get all entries for this artist from all users
+            # update all previous scrobbles for this artist for all users, to reflect the new popularity
             all_user_entries = users_table.search(Query().username.exists())
             for user_entry in all_user_entries:
                 user_scrobbles = user_entry['user_scrobbles']
@@ -42,35 +46,42 @@ def calculate_user_money_sum(user):
                 user_money_sum = user_entry['money']
                 for scrobble_info in user_scrobbles:
                     scrobble_artist, scrobble_title, scrobble_album, _, scrobble_timestamp, original_scrobble_popularity = scrobble_info
-                    if scrobble_artist == artist.name:
+                    if scrobble_artist == artist.name and scrobble_timestamp < timestamp:
                         new_popularity_difference = popularity - original_scrobble_popularity + 1
                         user_money_sum += new_popularity_difference
                         updated_scrobbles.append((scrobble_artist, scrobble_title, scrobble_album, new_popularity_difference, scrobble_timestamp, original_scrobble_popularity))
                     else:
                         updated_scrobbles.append(scrobble_info)
                 users_table.update({'user_scrobbles': updated_scrobbles, 'money': user_money_sum}, Query().username == user_entry['username'])
-            print(f"Updated all previous scrobbles for artist {artist.name} for all users.")
-            
-        scrobble_timestamp = datetime.fromtimestamp(int(scrobble.timestamp)).date().isoformat().replace('-', '')
-        print(f"Track timestamp: {scrobble_timestamp}, Last updated: {last_updated}, Current timestamp: {timestamp}")
 
-        # get the closest matching entry for this track timestamp
+        # case where we are inserting new scrobble for the user
+        scrobble_timestamp = datetime.fromtimestamp(int(scrobble.timestamp)).date().isoformat().replace('-', '')
+
+        # get the closest popularity entry to when the scrobble was made
         artist_popularity_entries = artist_popularity_table.search(ArtistInfo.artist_name == artist.name)
         artist_popularity_entry = min(artist_popularity_entries, key=lambda x: abs(int(x['timestamp']) - int(scrobble_timestamp)))
         popularity_difference = popularity - artist_popularity_entry['popularity'] + 1
+
         user_money_sum += popularity_difference
         users_table.update({'money': user_money_sum}, Query().username == user.get_name())
+        try:
+            album = scrobble.track.get_album()
+            if album is not None:
+                album_title = album.title
+            else:
+                album_title = "Single"
+        except pylast.WSError as e:
+            if "Track not found" in str(e):
+                album_title = "Unknown"
+            else:
+                raise
 
-        if scrobble.track.get_album() is not None:
-            album_title = scrobble.track.get_album().title
-        else:
-            album_title = "Single"
+        print(f"User: {user.get_name()}, Scrobble: {scrobble.track.artist.name} - {scrobble.track.title}, Album: {album_title}, Popularity Difference: {popularity_difference}, Timestamp: {scrobble_timestamp}, Popularity: {popularity}")
         user_scrobbles.append((scrobble.track.artist.name, scrobble.track.title, album_title, popularity_difference, scrobble_timestamp, popularity))
-    
+        print(f"User Scrobble Added: {scrobble.track.artist.name} - {scrobble.track.title} ({album_title}) [{popularity_difference}€]")
+
+    print(f"User Scrobbles Updated: {user_scrobbles}s")
     users_table.update({'user_scrobbles': user_scrobbles}, Query().username == user.get_name())
-    
-    print(artist_popularity_table.all())
-    print(users_table.all())
     return user_money_sum
 
 def required_env(name):
@@ -151,7 +162,7 @@ async def on_message(message):
             await message.channel.send(f"{message.author.name}, you have no recorded scrobbles yet.")
             return
         scrobbles_message = "Your recorded scrobbles:\n"
-        for artist, title, album, money in user_scrobbles:
+        for artist, title, album, money, _, _ in user_scrobbles:
                 scrobbles_message += f"{artist} - {title} ({album}) [{money}€]\n"
         await message.channel.send(scrobbles_message)
 
@@ -166,7 +177,7 @@ async def on_message(message):
             await message.channel.send(f"{message.author.name}, you have no recorded scrobbles yet.")
             return
         album_dict = {}
-        for artist, title, album, money in user_scrobbles:
+        for artist, title, album, money, _, _ in user_scrobbles:
             if album != "Single":
                 if album not in album_dict:
                     album_dict[album] = {
@@ -189,7 +200,7 @@ async def on_message(message):
             await message.channel.send(f"{message.author.name}, you have no recorded scrobbles yet.")
             return
         artist_dict = {}
-        for artist, title, album, money in user_scrobbles:
+        for artist, title, album, money, _, _ in user_scrobbles:
             if artist not in artist_dict:
                 artist_dict[artist] = {
                     'total_money': 0,
