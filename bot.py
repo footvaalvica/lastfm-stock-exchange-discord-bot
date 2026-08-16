@@ -87,7 +87,7 @@ def calculate_user_money_sum(user):
 def required_env(name):
     value = os.getenv(name)
     if not value:
-        raise RuntimeError("Missing required environment variable: " + name)
+        raise RuntimeError(f"Missing required environment variable: {name}")
     return value
 
 
