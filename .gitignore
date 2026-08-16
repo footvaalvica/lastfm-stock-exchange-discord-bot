@@ -9,4 +9,22 @@ devenv.local.yaml
 # pre-commit
 .pre-commit-config.yaml
 
-db.json
+# Database
+db.sqlite3
+db.sqlite3-wal
+db.sqlite3-shm
+
+# Environment
+.env
+
+# Tests
+.pytest_cache
+.coverage
+htmlcov/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
