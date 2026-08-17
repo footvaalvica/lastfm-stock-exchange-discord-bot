@@ -3,7 +3,7 @@ import datetime
 import discord
 from discord import app_commands
 from discord.ext import commands
-from services.database import get_user, insert_user, update_last_preview, update_user_money, get_bot_config, set_bot_config
+from services.database import get_user, insert_user, update_last_preview, update_user_money, get_guild_config, set_guild_config
 from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
@@ -90,7 +90,8 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="claim", description="Claim your daily portfolio value")
     async def slash_claim(self, interaction: discord.Interaction):
-        user_row = get_user(interaction.user.id)
+        guild_id = interaction.guild.id if interaction.guild else 0
+        user_row = get_user(interaction.user.id, guild_id)
         if not user_row:
             await interaction.response.send_message(
                 f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
@@ -113,14 +114,15 @@ class MusicCommands(commands.Cog):
         await interaction.response.defer()
         logger.info("Fetching money for user: %s", interaction.user.name)
         user = await get_lastfm_user(user_row['lastfm_username'])
-        total_money, gain_loss = await process_user_claim(user, interaction.user.id)
+        total_money, gain_loss = await process_user_claim(user, interaction.user.id, guild_id)
         gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
         await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
 
 
     @app_commands.command(name="check", description="Recalculate your portfolio value (1h cooldown, admin bypass)")
     async def slash_check(self, interaction: discord.Interaction):
-        user_row = get_user(interaction.user.id)
+        guild_id = interaction.guild.id if interaction.guild else 0
+        user_row = get_user(interaction.user.id, guild_id)
         if not user_row:
             await interaction.response.send_message(
                 f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
@@ -145,17 +147,18 @@ class MusicCommands(commands.Cog):
         await interaction.response.defer()
         logger.info("Checking portfolio for user: %s (admin=%s)", interaction.user.name, is_admin)
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        total_money, gain_loss = await calculate_portfolio_value(interaction.user.id, today_str)
+        total_money, gain_loss = await calculate_portfolio_value(interaction.user.id, guild_id, today_str)
         gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
-        update_user_money(interaction.user.id, total_money)
+        update_user_money(interaction.user.id, guild_id, total_money)
         if not is_admin:
-            update_last_preview(interaction.user.id, now_ts)
+            update_last_preview(interaction.user.id, guild_id, now_ts)
         await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
 
 
     @app_commands.command(name="balance", description="View your balance")
     async def slash_balance(self, interaction: discord.Interaction):
-        user_row = get_user(interaction.user.id)
+        guild_id = interaction.guild.id if interaction.guild else 0
+        user_row = get_user(interaction.user.id, guild_id)
         if not user_row:
             await interaction.response.send_message(
                 f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
@@ -167,7 +170,8 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="portfolio", description="View your portfolio breakdown")
     async def slash_portfolio(self, interaction: discord.Interaction, sort_by: str = "value"):
-        user_row = get_user(interaction.user.id)
+        guild_id = interaction.guild.id if interaction.guild else 0
+        user_row = get_user(interaction.user.id, guild_id)
         if not user_row:
             await interaction.response.send_message(
                 f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
@@ -185,7 +189,7 @@ class MusicCommands(commands.Cog):
 
         await interaction.response.defer()
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        breakdown = await get_portfolio_breakdown(interaction.user.id, today_str, sort_by=sort_by)
+        breakdown = await get_portfolio_breakdown(interaction.user.id, guild_id, today_str, sort_by=sort_by)
         if not breakdown:
             await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
             return
@@ -201,10 +205,11 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="leaderboard", description="View the leaderboard")
     async def slash_leaderboard(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id if interaction.guild else 0
         await interaction.response.defer()
         from services.database import get_db
         conn = get_db()
-        rows = conn.execute('SELECT discord_id, username FROM users').fetchall()
+        rows = conn.execute('SELECT discord_id, username, guild_id FROM users WHERE guild_id = ?', (guild_id,)).fetchall()
         conn.close()
 
         if not rows:
@@ -219,7 +224,7 @@ class MusicCommands(commands.Cog):
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         leaderboard = []
         for row in rows:
-            value, _ = await calculate_portfolio_value(row['discord_id'], today_str)
+            value, _ = await calculate_portfolio_value(row['discord_id'], guild_id, today_str)
             leaderboard.append((row['username'], value))
 
         leaderboard.sort(key=lambda x: x[1], reverse=True)
@@ -238,9 +243,10 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="lastfm", description="Set your Last.fm username")
     async def slash_lastfm(self, interaction: discord.Interaction, lastfm_username: str):
+        guild_id = interaction.guild.id if interaction.guild else 0
         try:
             await validate_lastfm_user(lastfm_username)
-            insert_user(interaction.user.id, interaction.user.name, lastfm_username)
+            insert_user(interaction.user.id, guild_id, interaction.user.name, lastfm_username)
             await interaction.response.send_message(f"{interaction.user.mention}, your Last.fm username has been set to {lastfm_username}.")
         except pylast.WSError:
             await interaction.response.send_message("Last.fm user not found.", ephemeral=True)
@@ -334,6 +340,7 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name="market", description="View market overview: top gainers, losers, and most held artists")
     async def slash_market(self, interaction: discord.Interaction):
         await interaction.response.defer()
+        guild_id = interaction.guild.id if interaction.guild else 0
         overview = get_market_overview()
 
         sections = []
@@ -397,20 +404,24 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="marketconfig", description="Configure the daily market summary channel and time (admin only)")
     @app_commands.choices(time=[
-        app_commands.Choice(name=f"{h:02d}:00 UTC", value=f"{h:02d}:00") for h in range(24)
+        app_commands.Choice(name=f"{h:02d}:00", value=f"{h:02d}:00") for h in range(24)
     ])
-    async def slash_marketconfig(self, interaction: discord.Interaction, channel: discord.TextChannel, time: str):
+    @app_commands.choices(timezone=[
+        app_commands.Choice(name=f"UTC{offset:+.0f}", value=f"{offset:+d}") for offset in range(-12, 13)
+    ])
+    async def slash_marketconfig(self, interaction: discord.Interaction, channel: discord.TextChannel, time: str, timezone: str):
         is_admin = interaction.user.guild_permissions.administrator if interaction.guild else False
         if not is_admin:
             await interaction.response.send_message("You need administrator permissions to use this command.", ephemeral=True)
             return
 
         hour = int(time.split(':')[0])
-        set_bot_config('market_channel_id', str(channel.id))
-        set_bot_config('market_hour_utc', str(hour))
+        guild_id = interaction.guild.id if interaction.guild else 0
+        set_guild_config(guild_id, channel.id, hour, timezone)
 
+        tz_str = f"UTC{timezone}" if timezone.startswith('+') else f"UTC{timezone}"
         await interaction.response.send_message(
-            f"Daily market summary configured: channel {channel.mention}, time {time} UTC",
+            f"Daily market summary configured: channel {channel.mention}, will fire at {time} your local time ({tz_str})",
             ephemeral=True
         )
 

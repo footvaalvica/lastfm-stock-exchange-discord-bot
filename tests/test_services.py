@@ -20,6 +20,8 @@ from services.database import (
 from services.portfolio import calculate_portfolio_value, get_portfolio_breakdown, get_artist_info, get_artist_price_history, get_market_overview
 from cogs.commands import format_listeners
 
+GUILD_ID = 1
+
 
 @pytest.fixture
 def tmp_db(tmp_path):
@@ -33,8 +35,8 @@ def tmp_db(tmp_path):
 
 
 def test_insert_and_get_user(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm", 100.0, 1234567890)
-    user = get_user(123456789)
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm", 100.0, 1234567890)
+    user = get_user(123456789, GUILD_ID)
     assert user is not None
     assert user["lastfm_username"] == "alice_lfm"
     assert user["money"] == 100.0
@@ -42,57 +44,56 @@ def test_insert_and_get_user(tmp_db):
 
 
 def test_insert_user_relink_preserves_money(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm", 100.0, 1234567890)
-    insert_user(123456789, "alice", "new_lfm")
-    user = get_user(123456789)
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm", 100.0, 1234567890)
+    insert_user(123456789, GUILD_ID, "alice", "new_lfm")
+    user = get_user(123456789, GUILD_ID)
     assert user["lastfm_username"] == "new_lfm"
     assert user["money"] == 100.0
     assert user["last_claim"] == 1234567890
 
 
 def test_update_last_preview(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm")
-    update_last_preview(123456789, 9999999999)
-    user = get_user(123456789)
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    update_last_preview(123456789, GUILD_ID, 9999999999)
+    user = get_user(123456789, GUILD_ID)
     assert user["last_preview"] == 9999999999
 
 
 def test_get_user_missing(tmp_db):
-    assert get_user(999999999) is None
+    assert get_user(999999999, GUILD_ID) is None
 
 
 def test_insert_and_get_scrobbles(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm")
-    insert_scrobble(123456789, "Taylor Swift", "Anti-Hero", "Midnights", 15250000, "20260722")
-    insert_scrobble(123456789, "Drake", "God's Plan", "Scorpion", 11975000, "20260723")
-    rows = get_scrobbles(123456789)
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Anti-Hero", "Midnights", 15250000, "20260722")
+    insert_scrobble(123456789, GUILD_ID, "Drake", "God's Plan", "Scorpion", 11975000, "20260723")
+    rows = get_scrobbles(123456789, GUILD_ID)
     assert len(rows) == 2
-    assert rows[0]["artist_name"] == "Taylor Swift"
-    assert rows[0]["purchase_price"] == 15250000
-    assert rows[1]["artist_name"] == "Drake"
-    assert rows[1]["purchase_price"] == 11975000
+    artists = {row["artist_name"]: row["purchase_price"] for row in rows}
+    assert artists["Taylor Swift"] == 15250000
+    assert artists["Drake"] == 11975000
 
 
 def test_insert_scrobble_duplicate_is_ignored(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm")
-    insert_scrobble(123456789, "Taylor Swift", "Anti-Hero", "Midnights", 15250000, "20260722")
-    insert_scrobble(123456789, "Taylor Swift", "Anti-Hero", "Midnights", 15250000, "20260722")
-    rows = get_scrobbles(123456789)
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Anti-Hero", "Midnights", 15250000, "20260722")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Anti-Hero", "Midnights", 15250000, "20260722")
+    rows = get_scrobbles(123456789, GUILD_ID)
     assert len(rows) == 1
 
 
 def test_update_user_money_and_claim(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm", 100.0, 1234567890)
-    update_user_money_and_claim(123456789, 250.0, 9999999999)
-    user = get_user(123456789)
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm", 100.0, 1234567890)
+    update_user_money_and_claim(123456789, GUILD_ID, 250.0, 9999999999)
+    user = get_user(123456789, GUILD_ID)
     assert user["money"] == 250.0
     assert user["last_claim"] == 9999999999
 
 
 def test_update_user_money(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm", 100.0, 1234567890)
-    update_user_money(123456789, 500.0)
-    user = get_user(123456789)
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm", 100.0, 1234567890)
+    update_user_money(123456789, GUILD_ID, 500.0)
+    user = get_user(123456789, GUILD_ID)
     assert user["money"] == 500.0
     assert user["last_claim"] == 1234567890
 
@@ -126,32 +127,32 @@ def test_get_closest_snapshot_missing(tmp_db):
 
 @pytest.mark.asyncio
 async def test_calculate_portfolio_value_empty(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm")
-    value, gain = await calculate_portfolio_value(123456789, "20260722")
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    value, gain = await calculate_portfolio_value(123456789, GUILD_ID, "20260722")
     assert value == 0.0
     assert gain == 0.0
 
 
 @pytest.mark.asyncio
 async def test_calculate_portfolio_value_with_snapshot(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm")
-    insert_scrobble(123456789, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260722")
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260722")
     upsert_snapshot("Taylor Swift", 15200000, "20260722")
 
-    value, gain = await calculate_portfolio_value(123456789, "20260722")
+    value, gain = await calculate_portfolio_value(123456789, GUILD_ID, "20260722")
     assert value == pytest.approx(10.1333, abs=1e-3)
     assert gain == pytest.approx(1.3333, abs=1e-3)
 
 
 @pytest.mark.asyncio
 async def test_get_portfolio_breakdown(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm")
-    insert_scrobble(123456789, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260722")
-    insert_scrobble(123456789, "Drake", "God's Plan", "Scorpion", 11975000, "20260723")
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260722")
+    insert_scrobble(123456789, GUILD_ID, "Drake", "God's Plan", "Scorpion", 11975000, "20260723")
     upsert_snapshot("Taylor Swift", 15200000, "20260722")
     upsert_snapshot("Drake", 12000000, "20260722")
 
-    breakdown = await get_portfolio_breakdown(123456789, "20260722", sort_by="value")
+    breakdown = await get_portfolio_breakdown(123456789, GUILD_ID, "20260722", sort_by="value")
     assert len(breakdown) == 2
     assert breakdown[0]['artist_name'] == "Taylor Swift"
     assert breakdown[0]['shares'] == 1
@@ -159,10 +160,10 @@ async def test_get_portfolio_breakdown(tmp_db):
     assert breakdown[1]['artist_name'] == "Drake"
     assert breakdown[1]['current_value'] == pytest.approx(10.0209, abs=1e-3)
 
-    breakdown_by_price = await get_portfolio_breakdown(123456789, "20260722", sort_by="price")
+    breakdown_by_price = await get_portfolio_breakdown(123456789, GUILD_ID, "20260722", sort_by="price")
     assert breakdown_by_price[0]['artist_name'] == "Taylor Swift"
 
-    breakdown_by_quantity = await get_portfolio_breakdown(123456789, "20260722", sort_by="quantity")
+    breakdown_by_quantity = await get_portfolio_breakdown(123456789, GUILD_ID, "20260722", sort_by="quantity")
     assert breakdown_by_quantity[0]['shares'] == 1
 
 
@@ -227,13 +228,13 @@ def test_get_closest_snapshot_uses_historical_price(tmp_db):
 
 @pytest.mark.asyncio
 async def test_calculate_portfolio_value_preserves_individual_gains(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm")
-    insert_scrobble(123456789, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260720")
-    insert_scrobble(123456789, "Taylor Swift", "Cruel Summer", "Lover", 15000000, "20260722")
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260720")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Cruel Summer", "Lover", 15000000, "20260722")
     upsert_snapshot("Taylor Swift", 15000000, "20260720")
     upsert_snapshot("Taylor Swift", 15200000, "20260722")
 
-    value, gain = await calculate_portfolio_value(123456789, "20260722")
+    value, gain = await calculate_portfolio_value(123456789, GUILD_ID, "20260722")
     assert value == pytest.approx(20.2667, abs=1e-3)
 
 
@@ -256,13 +257,13 @@ def test_get_price_changes(tmp_db):
 
 
 def test_get_most_held_artists(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm")
-    insert_user(999999999, "bob", "bob_lfm")
-    insert_scrobble(123456789, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260722")
-    insert_scrobble(123456789, "Taylor Swift", "Cruel Summer", "Lover", 15000000, "20260722")
-    insert_scrobble(999999999, "Drake", "God's Plan", "Scorpion", 12000000, "20260722")
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_user(999999999, GUILD_ID, "bob", "bob_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260722")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Cruel Summer", "Lover", 15000000, "20260722")
+    insert_scrobble(999999999, GUILD_ID, "Drake", "God's Plan", "Scorpion", 12000000, "20260722")
 
-    most_held = get_most_held_artists(limit=2)
+    most_held = get_most_held_artists(limit=2, guild_id=GUILD_ID)
     assert len(most_held) == 2
     assert most_held[0]['artist_name'] == 'Taylor Swift'
     assert most_held[0]['count'] == 2
@@ -278,9 +279,9 @@ async def test_get_market_overview(tmp_db):
     upsert_snapshot("Taylor Swift", 15200000, today)
     upsert_snapshot("Drake", 12000000, yesterday)
     upsert_snapshot("Drake", 11900000, today)
-    insert_user(123456789, "alice", "alice_lfm")
-    insert_scrobble(123456789, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260722")
-    insert_scrobble(123456789, "Drake", "God's Plan", "Scorpion", 12000000, "20260722")
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260722")
+    insert_scrobble(123456789, GUILD_ID, "Drake", "God's Plan", "Scorpion", 12000000, "20260722")
 
     overview = get_market_overview()
     assert len(overview['gainers']) == 1
@@ -296,8 +297,8 @@ async def test_get_artist_info_uses_yesterday_as_base(tmp_db):
     yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
     upsert_snapshot("Phoebe Bridgers", 2251500, yesterday)
     upsert_snapshot("Phoebe Bridgers", 2253102, today)
-    insert_user(123456789, "alice", "alice_lfm")
-    insert_scrobble(123456789, "Phoebe Bridgers", "Garden Song", "Punisher", 2251500, yesterday)
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Phoebe Bridgers", "Garden Song", "Punisher", 2251500, yesterday)
 
     info = await get_artist_info("Phoebe Bridgers", today)
     assert info is not None

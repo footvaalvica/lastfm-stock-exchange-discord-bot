@@ -11,8 +11,8 @@ from services.lastfm import fetch_recent_tracks, get_artist_listener_count
 BASE_SHARE_VALUE = 10.0
 
 
-async def calculate_portfolio_value(discord_id: int, today_str: str) -> tuple[float, float]:
-    rows = get_scrobbles(discord_id)
+async def calculate_portfolio_value(discord_id: int, guild_id: int, today_str: str) -> tuple[float, float]:
+    rows = get_scrobbles(discord_id, guild_id)
     if not rows:
         return 0.0, 0.0
 
@@ -49,17 +49,17 @@ async def get_or_create_daily_snapshot(artist_name: str, date_str: str) -> tuple
     return listeners, canonical_name
 
 
-async def process_user_claim(user, discord_id: int) -> float:
+async def process_user_claim(user, discord_id: int, guild_id: int) -> float:
     now = datetime.datetime.now(datetime.timezone.utc)
     today_str = now.date().isoformat().replace('-', '')
     unix_timestamp = int(now.timestamp())
 
-    user_row = get_user(discord_id)
+    user_row = get_user(discord_id, guild_id)
     if not user_row:
         return 0.0
 
     last_claim = user_row['last_claim']
-    user_scrobbles = get_scrobbles(discord_id)
+    user_scrobbles = get_scrobbles(discord_id, guild_id)
 
     if last_claim == 0:
         time_from = int((now - datetime.timedelta(days=1)).timestamp())
@@ -102,21 +102,21 @@ async def process_user_claim(user, discord_id: int) -> float:
                 raise
 
         new_scrobbles.append((
-            discord_id, canonical_name, scrobble.track.title,
+            discord_id, guild_id, canonical_name, scrobble.track.title,
             album_title, purchase_price, scrobble_timestamp
         ))
 
     for s in new_scrobbles:
         insert_scrobble(*s)
 
-    total_money, gain_loss = await calculate_portfolio_value(discord_id, today_str)
-    update_user_money_and_claim(discord_id, total_money, unix_timestamp)
+    total_money, gain_loss = await calculate_portfolio_value(discord_id, guild_id, today_str)
+    update_user_money_and_claim(discord_id, guild_id, total_money, unix_timestamp)
 
     return total_money, gain_loss
 
 
-async def get_portfolio_breakdown(discord_id: int, today_str: str, sort_by: str = "value"):
-    rows = get_scrobbles(discord_id)
+async def get_portfolio_breakdown(discord_id: int, guild_id: int, today_str: str, sort_by: str = "value"):
+    rows = get_scrobbles(discord_id, guild_id)
     if not rows:
         return []
 
@@ -201,7 +201,7 @@ async def get_artist_info(artist_name: str, today_str: str) -> dict | None:
         existing = get_snapshot(canonical_name, today_str)
 
     current_price = existing['listeners']
-    total_shares = get_total_scrobbles_for_artist(canonical_name)
+    total_shares = get_total_scrobbles_for_artist(canonical_name, guild_id=0)
 
     yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
     yesterday_snapshot = get_snapshot(canonical_name, yesterday)
@@ -224,7 +224,7 @@ def get_market_overview() -> dict:
     changes = get_price_changes(days=1)
     gainers = sorted([c for c in changes if c['change_percent'] > 0], key=lambda x: x['change_percent'], reverse=True)[:5]
     losers = sorted([c for c in changes if c['change_percent'] < 0], key=lambda x: x['change_percent'])[:5]
-    most_held = get_most_held_artists(limit=5)
+    most_held = get_most_held_artists(limit=5, guild_id=0)
     return {
         'gainers': gainers,
         'losers': losers,

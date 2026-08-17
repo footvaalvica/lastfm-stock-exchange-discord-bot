@@ -3,7 +3,7 @@ import logging
 import discord
 from discord.ext import commands, tasks
 from config import DISCORD_TOKEN
-from services.database import init_db, get_bot_config
+from services.database import init_db, get_all_guild_configs
 from services.portfolio import get_market_overview
 from cogs.commands import setup as commands_setup
 
@@ -31,21 +31,16 @@ async def on_ready():
     send_market_summary.start()
 
 
-@tasks.loop(hours=1)
+@tasks.loop(minutes=1)
 async def send_market_summary():
-    channel_id = get_bot_config('market_channel_id')
-    if not channel_id:
-        return
-    channel = bot.get_channel(int(channel_id))
-    if not channel:
-        return
-
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    market_hour = int(get_bot_config('market_hour_utc') or '9')
-    if now_utc.hour != market_hour or now_utc.minute != 0:
+    if now_utc.minute != 0:
         return
 
     overview = get_market_overview()
+    if not overview['gainers'] and not overview['losers']:
+        return
+
     sections = []
 
     if overview['gainers']:
@@ -60,16 +55,37 @@ async def send_market_summary():
             lines.append(f"📉 **{entry['artist_name']}**: {entry['change_percent']:.2f}%")
         sections.append("**Today's Biggest Loser**\n" + "\n".join(lines[:1]))
 
-    if not sections:
-        return
-
     body = "\n\n".join(sections)
     embed = discord.Embed(
         title="Daily Market Summary",
         description=body,
         color=discord.Color.blue()
     )
-    await channel.send(embed=embed)
+
+    for config in get_all_guild_configs():
+        channel_id = config.get('market_channel_id')
+        market_hour = config.get('market_hour_local')
+        market_timezone = config.get('market_timezone', 'UTC')
+        if not channel_id or market_hour is None:
+            continue
+
+        try:
+            tz = datetime.timezone(datetime.timedelta(hours=int(market_timezone)))
+            local_now = now_utc.astimezone(tz)
+        except Exception:
+            local_now = now_utc
+
+        if local_now.hour != market_hour or local_now.minute != 0:
+            continue
+
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            continue
+
+        try:
+            await channel.send(embed=embed)
+        except Exception as e:
+            logger.error('Failed to send market summary to channel %d: %s', channel_id, e)
 
 
 async def main():
