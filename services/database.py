@@ -140,6 +140,28 @@ def get_scrobbles(discord_id: int, guild_id: int):
     return [dict(row) for row in rows]
 
 
+def get_transactions(discord_id: int, guild_id: int, artist_name: str | None = None) -> list[dict]:
+    conn = get_db()
+    if artist_name:
+        rows = conn.execute(
+            '''SELECT artist_name, title, album, purchase_price, scrobble_date
+               FROM scrobbles
+               WHERE discord_id = ? AND guild_id = ? AND artist_name = ? COLLATE NOCASE
+               ORDER BY scrobble_date DESC''',
+            (discord_id, guild_id, artist_name)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            '''SELECT artist_name, title, album, purchase_price, scrobble_date
+               FROM scrobbles
+               WHERE discord_id = ? AND guild_id = ?
+               ORDER BY scrobble_date DESC''',
+            (discord_id, guild_id)
+        ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 def insert_scrobble(discord_id: int, guild_id: int, artist_name: str, title: str, album: str, purchase_price: int, scrobble_date: str):
     conn = get_db()
     conn.execute(

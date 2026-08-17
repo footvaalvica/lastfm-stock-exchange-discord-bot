@@ -15,7 +15,7 @@ from services.database import (
     get_db, init_db, get_user, insert_user, get_scrobbles,
     insert_scrobble, update_user_money_and_claim,
     get_closest_snapshot, get_snapshot, upsert_snapshot, update_last_preview,
-    update_user_money, get_price_changes, get_most_held_artists
+    update_user_money, get_price_changes, get_most_held_artists, get_transactions
 )
 from services.portfolio import calculate_portfolio_value, get_portfolio_breakdown, get_artist_info, get_artist_price_history, get_market_overview
 from cogs.commands import format_listeners
@@ -316,3 +316,27 @@ async def test_get_artist_info_fallback_to_current_when_no_history(tmp_db):
     assert info is not None
     assert info['base_price'] == 5000000
     assert info['gain_loss_percent'] == 0.0
+
+
+def test_get_transactions_all(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Anti-Hero", "Midnights", 15250000, "20260722")
+    insert_scrobble(123456789, GUILD_ID, "Drake", "God's Plan", "Scorpion", 11975000, "20260723")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Cruel Summer", "Lover", 15100000, "20260724")
+
+    txs = get_transactions(123456789, GUILD_ID)
+    assert len(txs) == 3
+    assert txs[0]['artist_name'] == "Taylor Swift"
+    assert txs[1]['artist_name'] == "Drake"
+    assert txs[2]['artist_name'] == "Taylor Swift"
+
+
+def test_get_transactions_filtered_by_artist(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", "Anti-Hero", "Midnights", 15250000, "20260722")
+    insert_scrobble(123456789, GUILD_ID, "Drake", "God's Plan", "Scorpion", 11975000, "20260723")
+
+    txs = get_transactions(123456789, GUILD_ID, artist_name="Taylor Swift")
+    assert len(txs) == 1
+    assert txs[0]['artist_name'] == "Taylor Swift"
+    assert txs[0]['title'] == "Anti-Hero"

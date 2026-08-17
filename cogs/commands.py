@@ -3,7 +3,7 @@ import datetime
 import discord
 from discord import app_commands
 from discord.ext import commands
-from services.database import get_user, insert_user, update_last_preview, update_user_money, get_guild_config, set_guild_config
+from services.database import get_user, insert_user, update_last_preview, update_user_money, get_guild_config, set_guild_config, get_transactions
 from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
@@ -316,6 +316,71 @@ class MusicCommands(commands.Cog):
         await interaction.followup.send(embed=embed)
 
 
+    @app_commands.command(name="transactions", description="View your transaction history")
+    async def slash_transactions(self, interaction: discord.Interaction, artist_name: str = None):
+        guild_id = interaction.guild.id if interaction.guild else 0
+        rows = get_transactions(interaction.user.id, guild_id, artist_name)
+        if not rows:
+            if artist_name:
+                await interaction.response.send_message(f"No transactions found for **{artist_name}**.", ephemeral=True)
+            else:
+                await interaction.response.send_message("No transactions yet.", ephemeral=True)
+            return
+
+        grouped = {}
+        for row in rows:
+            name = row['artist_name']
+            if name not in grouped:
+                grouped[name] = []
+            grouped[name].append(row)
+
+        lines = []
+        for artist, txs in grouped.items():
+            if artist_name:
+                lines.append(f"**{artist}**")
+                i = 0
+                while i < len(txs):
+                    tx = txs[i]
+                    date_fmt = datetime.datetime.strptime(tx['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
+                    value = tx['purchase_price'] / 100_000
+                    count = 1
+                    while i + count < len(txs) and txs[i + count]['purchase_price'] == tx['purchase_price']:
+                        count += 1
+                    if count > 1:
+                        lines.append(f"  {date_fmt} x{count}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€)")
+                    else:
+                        lines.append(f"  {date_fmt}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€) — *{tx['title']}*")
+                    i += count
+            else:
+                lines.append(f"**{artist}** — {len(txs)} plays")
+                i = 0
+                shown = 0
+                while i < len(txs) and shown < 3:
+                    tx = txs[i]
+                    date_fmt = datetime.datetime.strptime(tx['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
+                    value = tx['purchase_price'] / 100_000
+                    count = 1
+                    while i + count < len(txs) and txs[i + count]['purchase_price'] == tx['purchase_price']:
+                        count += 1
+                    if count > 1:
+                        lines.append(f"  {date_fmt} x{count}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€)")
+                    else:
+                        lines.append(f"  {date_fmt}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€)")
+                    shown += count
+                    i += count
+                remaining = len(txs) - i
+                if remaining > 0:
+                    lines.append(f"  ...and {remaining} more")
+
+        body = "\n".join(lines)
+        embed = discord.Embed(
+            title=f"{interaction.user.name}'s Transactions",
+            description=body,
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed)
+
+
     @app_commands.command(name="rules", description="How to play")
     async def slash_rules(self, interaction: discord.Interaction):
         embed = discord.Embed(
@@ -388,6 +453,7 @@ class MusicCommands(commands.Cog):
             "/portfolio - View your portfolio breakdown\n"
             "/artist <name> - Look up an artist's stock info\n"
             "/history <name> - View an artist's price history\n"
+            "/transactions [artist] - View your transaction history\n"
             "/market - View market overview\n"
             "/marketconfig - Configure daily market summary (admin)\n"
             "/rules - How to play\n"
