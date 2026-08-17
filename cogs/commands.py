@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from services.database import get_user, insert_user, update_last_preview, update_user_money, set_guild_config, get_transactions, add_user_to_guild, get_scrobbles
-from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview, get_portfolio_value_at_date
+from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview, get_balance_stats
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
 logger = logging.getLogger('lastfm_bot')
@@ -315,39 +315,31 @@ class MusicCommands(commands.Cog):
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         yesterday_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
 
-        total_money, overall_gain = calculate_portfolio_value(interaction.user.id, today_str)
-        yesterday_value = get_portfolio_value_at_date(interaction.user.id, yesterday_str)
-        today_change = ((total_money - yesterday_value) / yesterday_value * 100) if yesterday_value > 0 else None
-
-        total_shares = sum(row['count'] for row in get_scrobbles(interaction.user.id))
-        breakdown = get_portfolio_breakdown(interaction.user.id, today_str)
-
-        top_holding = breakdown[0]['artist_name'] if breakdown else "N/A"
-        diversity = len(breakdown) if breakdown else 0
+        stats = get_balance_stats(interaction.user.id, today_str, yesterday_str)
 
         embed = discord.Embed(
             title="Portfolio Balance",
             color=discord.Color.blue()
         )
 
-        embed.add_field(name="💰 Value", value=f"{total_money:.2f}€", inline=True)
-        embed.add_field(name="📊 Shares", value=str(total_shares), inline=True)
-        embed.add_field(name="👨‍🎤 Artists", value=str(diversity), inline=True)
+        embed.add_field(name="💰 Value", value=f"{stats['total_value']:.2f}€", inline=True)
+        embed.add_field(name="📊 Shares", value=str(stats['total_shares']), inline=True)
+        embed.add_field(name="🎨 Artists", value=str(stats['diversity']), inline=True)
 
-        if overall_gain >= 0:
-            embed.add_field(name="📈 Overall", value=f"+{overall_gain:.2f}%", inline=True)
+        if stats['overall_gain'] >= 0:
+            embed.add_field(name="📈 Overall", value=f"+{stats['overall_gain']:.2f}%", inline=True)
         else:
-            embed.add_field(name="📉 Overall", value=f"{overall_gain:.2f}%", inline=True)
+            embed.add_field(name="📉 Overall", value=f"{stats['overall_gain']:.2f}%", inline=True)
 
-        if today_change is not None:
-            if today_change >= 0:
-                embed.add_field(name="📅 Today", value=f"+{today_change:.2f}%", inline=True)
+        if stats['today_change'] is not None:
+            if stats['today_change'] >= 0:
+                embed.add_field(name="📅 Today", value=f"+{stats['today_change']:.2f}%", inline=True)
             else:
-                embed.add_field(name="📅 Today", value=f"{today_change:.2f}%", inline=True)
+                embed.add_field(name="📅 Today", value=f"{stats['today_change']:.2f}%", inline=True)
         else:
             embed.add_field(name="📅 Today", value="N/A", inline=True)
 
-        embed.add_field(name="🏆 Top Holding", value=top_holding, inline=True)
+        embed.add_field(name="🏆 Top Holding", value=stats['top_holding'], inline=True)
 
         await interaction.followup.send(embed=embed)
 
@@ -405,15 +397,17 @@ class MusicCommands(commands.Cog):
             await interaction.followup.send("Could not generate chart right now. Try again later.")
             return
         if chart_path:
-            embed = discord.Embed(
-                title="Portfolio Allocation",
-                description="Your holdings by artist value",
-                color=discord.Color.blue()
-            )
-            file = discord.File(chart_path, filename='allocation.png')
-            embed.set_image(url='attachment://allocation.png')
-            await interaction.followup.send(embed=embed, file=file)
-            os.unlink(chart_path)
+            try:
+                embed = discord.Embed(
+                    title="Portfolio Allocation",
+                    description="Your holdings by artist value",
+                    color=discord.Color.blue()
+                )
+                file = discord.File(chart_path, filename='allocation.png')
+                embed.set_image(url='attachment://allocation.png')
+                await interaction.followup.send(embed=embed, file=file)
+            finally:
+                os.unlink(chart_path)
         else:
             await interaction.followup.send("Need at least 2 artists to show allocation.")
 
@@ -428,7 +422,7 @@ class MusicCommands(commands.Cog):
             '''SELECT u.username, u.money
                FROM users u
                JOIN user_guilds ug ON u.discord_id = ug.discord_id
-               WHERE ug.guild_id = ? AND u.money > 0
+               WHERE ug.guild_id = ?
                ORDER BY u.money DESC
                LIMIT 10''',
             (guild_id,)
@@ -549,6 +543,15 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="transactions", description="View your transaction history")
     async def slash_transactions(self, interaction: discord.Interaction, artist_name: str = None):
+        guild_id = interaction.guild.id if interaction.guild else 0
+        user_row = get_user_in_guild(interaction.user.id, guild_id)
+        if not user_row:
+            await interaction.response.send_message(
+                f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
+                ephemeral=True
+            )
+            return
+
         rows = get_transactions(interaction.user.id, artist_name)
         if not rows:
             if artist_name:

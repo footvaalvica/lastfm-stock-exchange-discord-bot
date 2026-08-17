@@ -137,14 +137,11 @@ def init_db():
         conn.execute('CREATE INDEX IF NOT EXISTS idx_scrobbles_artist ON scrobbles(artist_name)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_artist_popularity_artist ON artist_popularity(artist_name)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_artist_popularity_artist_ts ON artist_popularity(artist_name, timestamp)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guilds_discord_id ON user_guilds(discord_id)')
 
-    if not applied('create_user_guilds_table'):
-        apply('create_user_guilds_table', '''
-            CREATE TABLE IF NOT EXISTS user_guilds (
-                discord_id INTEGER NOT NULL,
-                guild_id INTEGER NOT NULL,
-                PRIMARY KEY (discord_id, guild_id)
-            )
+    if not applied('create_user_guilds_index'):
+        apply('create_user_guilds_index', '''
+            CREATE INDEX IF NOT EXISTS idx_user_guilds_discord_id ON user_guilds(discord_id)
         ''')
 
     conn.commit()
@@ -334,9 +331,14 @@ def get_latest_snapshot(artist_name: str):
 
 def upsert_snapshot(artist_name: str, listeners: int, timestamp: str):
     conn = get_db()
+    existing = conn.execute(
+        'SELECT artist_name FROM artist_popularity WHERE LOWER(artist_name) = LOWER(?)',
+        (artist_name,)
+    ).fetchone()
+    canonical_name = existing['artist_name'] if existing else artist_name
     conn.execute(
         'INSERT OR REPLACE INTO artist_popularity (artist_name, listeners, timestamp) VALUES (?, ?, ?)',
-        (artist_name, listeners, timestamp)
+        (canonical_name, listeners, timestamp)
     )
     conn.commit()
     conn.close()
@@ -369,12 +371,12 @@ def get_price_changes(days: int = 1) -> list[dict]:
     ).fetchall()
     conn.close()
 
-    past_by_name = {row['artist_name'].lower(): row['listeners'] for row in past_rows}
+    past_by_name = {row['artist_name']: row['listeners'] for row in past_rows}
     result = []
     for row in today_rows:
         artist_name = row['artist_name']
         today_listeners = row['listeners']
-        past_listeners = past_by_name.get(artist_name.lower())
+        past_listeners = past_by_name.get(artist_name)
         if past_listeners is None:
             continue
         change = today_listeners - past_listeners

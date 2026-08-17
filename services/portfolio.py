@@ -51,6 +51,88 @@ def calculate_portfolio_value(discord_id: int, today_str: str) -> tuple[float, f
     return total_value, avg_gain_loss_percent
 
 
+def get_balance_stats(discord_id: int, today_str: str, yesterday_str: str) -> dict:
+    rows = get_scrobbles(discord_id)
+    total_shares = sum(row['count'] for row in rows)
+
+    artist_data = {}
+    for row in rows:
+        artist_name = row['artist_name']
+        count = row['count']
+        if artist_name not in artist_data:
+            artist_data[artist_name] = {'shares': 0, 'total_purchase': 0}
+        artist_data[artist_name]['shares'] += count
+        artist_data[artist_name]['total_purchase'] += row['purchase_price'] * count
+
+    breakdown = []
+    total_value = 0.0
+    total_gain_percent = 0.0
+    total_shares_for_gain = 0
+    for artist_name, data in artist_data.items():
+        current_price = 0
+        has_price_data = False
+        snapshot = get_snapshot(artist_name, today_str)
+        if snapshot:
+            current_price = snapshot['listeners']
+            has_price_data = True
+        else:
+            snapshot = get_latest_snapshot(artist_name)
+            if snapshot:
+                current_price = snapshot['listeners']
+                has_price_data = True
+
+        avg_purchase = data['total_purchase'] / data['shares']
+        shares = data['shares']
+        if not has_price_data or avg_purchase <= 0:
+            current_value = BASE_SHARE_VALUE * shares
+            gain_loss_percent = 0.0
+        else:
+            current_value = BASE_SHARE_VALUE * (current_price / avg_purchase) * shares
+            gain_loss_percent = (current_price / avg_purchase - 1) * 100
+
+        total_value += current_value
+        total_gain_percent += gain_loss_percent * shares
+        total_shares_for_gain += shares
+        breakdown.append({
+            'artist_name': artist_name,
+            'shares': shares,
+            'current_value': current_value,
+        })
+
+    overall_gain = (total_gain_percent / total_shares_for_gain) if total_shares_for_gain > 0 else 0.0
+
+    yesterday_value = 0.0
+    seen_prices = {}
+    for row in rows:
+        artist_name = row['artist_name']
+        count = row['count']
+        purchase_price = row['purchase_price']
+        if artist_name not in seen_prices:
+            price = get_closest_snapshot(artist_name, yesterday_str)
+            if price is None:
+                latest = get_latest_snapshot(artist_name)
+                price = latest['listeners'] if latest else 0
+            seen_prices[artist_name] = price
+        price = seen_prices[artist_name]
+        if price <= 0 or purchase_price <= 0:
+            yesterday_value += BASE_SHARE_VALUE * count
+        else:
+            yesterday_value += BASE_SHARE_VALUE * (price / purchase_price) * count
+
+    today_change = ((total_value - yesterday_value) / yesterday_value * 100) if yesterday_value > 0 else None
+    top_holding = max(breakdown, key=lambda x: x['current_value'])['artist_name'] if breakdown else "N/A"
+    diversity = len(breakdown)
+
+    return {
+        'total_value': total_value,
+        'total_shares': total_shares,
+        'overall_gain': overall_gain,
+        'today_change': today_change,
+        'top_holding': top_holding,
+        'diversity': diversity,
+    }
+
+
 def get_portfolio_value_at_date(discord_id: int, date_str: str) -> float:
     rows = get_scrobbles(discord_id)
     if not rows:
