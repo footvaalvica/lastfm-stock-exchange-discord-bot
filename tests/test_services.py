@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from services.database import (
     get_db, init_db, get_user, insert_user, get_scrobbles,
     insert_scrobble, update_user_money_and_claim,
-    get_closest_snapshot, get_snapshot, upsert_snapshot, update_last_preview
+    get_closest_snapshot, get_snapshot, upsert_snapshot, update_last_preview,
+    update_user_money
 )
 from services.portfolio import calculate_portfolio_value, get_portfolio_breakdown, get_artist_info, get_artist_price_history
 from cogs.commands import format_listeners
@@ -81,11 +82,19 @@ def test_insert_scrobble_duplicate_is_ignored(tmp_db):
 
 
 def test_update_user_money_and_claim(tmp_db):
-    insert_user(123456789, "alice", "alice_lfm")
+    insert_user(123456789, "alice", "alice_lfm", 100.0, 1234567890)
     update_user_money_and_claim(123456789, 250.0, 9999999999)
     user = get_user(123456789)
     assert user["money"] == 250.0
     assert user["last_claim"] == 9999999999
+
+
+def test_update_user_money(tmp_db):
+    insert_user(123456789, "alice", "alice_lfm", 100.0, 1234567890)
+    update_user_money(123456789, 500.0)
+    user = get_user(123456789)
+    assert user["money"] == 500.0
+    assert user["last_claim"] == 1234567890
 
 
 def test_snapshot_crud(tmp_db):

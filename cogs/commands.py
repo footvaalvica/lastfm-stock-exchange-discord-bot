@@ -4,11 +4,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import pylast
-from services.database import get_user, insert_user, update_last_preview
+from services.database import get_user, insert_user, update_last_preview, update_user_money
 from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
 logger = logging.getLogger('lastfm_bot')
+
+PAGE_SIZE = 10
 
 
 def format_listeners(count: int) -> str:
@@ -17,6 +19,67 @@ def format_listeners(count: int) -> str:
     if count >= 1_000:
         return f"{count / 1_000:.1f}k"
     return str(count)
+
+
+class PortfolioView(discord.ui.View):
+    def __init__(self, author_id: int, breakdown: list[dict], total_value: float, total_shares: int, total_gain_percent: float, sort_by: str):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.breakdown = breakdown
+        self.total_value = total_value
+        self.total_shares = total_shares
+        self.total_gain_percent = total_gain_percent
+        self.sort_by = sort_by
+        self.page = 0
+        self.total_pages = max(1, (len(breakdown) + PAGE_SIZE - 1) // PAGE_SIZE)
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.previous_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= self.total_pages - 1
+
+    def _build_embed(self) -> discord.Embed:
+        start = self.page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        page_items = self.breakdown[start:end]
+
+        embed_color = discord.Color.green() if self.total_gain_percent >= 0 else discord.Color.red()
+
+        lines = []
+        for item in page_items:
+            gain = item['gain_loss_percent']
+            gain_str = f"{gain:+.2f}%"
+            lines.append(f"**{item['artist_name']}** ×{item['shares']}\n💰 {item['current_value']:.2f}€ | 📈 {gain_str}")
+
+        body = "\n".join(lines)
+        embed = discord.Embed(
+            title=f"Portfolio (page {self.page + 1}/{self.total_pages})",
+            description=body,
+            color=embed_color
+        )
+        embed.set_footer(text=f"Total: {self.total_value:.2f}€ | {self.total_shares} shares | {self.total_gain_percent:+.2f}%")
+        return embed
+
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+            self._update_buttons()
+            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page < self.total_pages - 1:
+            self.page += 1
+            self._update_buttons()
+            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
 
 
 class MusicCommands(commands.Cog):
@@ -100,6 +163,7 @@ class MusicCommands(commands.Cog):
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         total_money, gain_loss = await calculate_portfolio_value(ctx.author.id, today_str)
         gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
+        update_user_money(ctx.author.id, total_money)
         if not is_admin:
             update_last_preview(ctx.author.id, now_ts)
         await ctx.send(f"{ctx.author.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
@@ -134,9 +198,31 @@ class MusicCommands(commands.Cog):
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         total_money, gain_loss = await calculate_portfolio_value(interaction.user.id, today_str)
         gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
+        update_user_money(interaction.user.id, total_money)
         if not is_admin:
             update_last_preview(interaction.user.id, now_ts)
         await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
+
+
+    @commands.command(name="balance")
+    async def prefix_balance(self, ctx):
+        user_row = get_user(ctx.author.id)
+        if not user_row:
+            await ctx.send(f"{ctx.author.name}, set up your account first by setting your Last.fm username.")
+            return
+        await ctx.send(f"{ctx.author.mention}, your portfolio is worth **{user_row['money']:.2f}€** (+0.00%)")
+
+
+    @app_commands.command(name="balance", description="View your balance")
+    async def slash_balance(self, interaction: discord.Interaction):
+        user_row = get_user(interaction.user.id)
+        if not user_row:
+            await interaction.response.send_message(
+                f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
+                ephemeral=True
+            )
+            return
+        await interaction.response.send_message(f"{interaction.user.mention}, your portfolio is worth **{user_row['money']:.2f}€** (+0.00%)")
 
 
     @commands.command(name="portfolio")
@@ -156,22 +242,9 @@ class MusicCommands(commands.Cog):
         total_shares = sum(item['shares'] for item in breakdown)
         total_base = BASE_SHARE_VALUE * total_shares
         total_gain_percent = ((total_value - total_base) / total_base * 100) if total_base > 0 else 0.0
-        embed_color = discord.Color.green() if total_gain_percent >= 0 else discord.Color.red()
 
-        lines = []
-        for item in breakdown:
-            gain = item['gain_loss_percent']
-            gain_str = f"{gain:+.2f}%"
-            lines.append(f"**{item['artist_name']}** ×{item['shares']}\n💰 {item['current_value']:.2f}€ | 📈 {gain_str}")
-
-        body = "\n".join(lines)
-        embed = discord.Embed(
-            title=f"{ctx.author.name}'s Portfolio",
-            description=body,
-            color=embed_color
-        )
-
-        await ctx.send(embed=embed)
+        view = PortfolioView(ctx.author.id, breakdown, total_value, total_shares, total_gain_percent, "value")
+        await ctx.send(embed=view._build_embed(), view=view)
 
 
     @app_commands.command(name="portfolio", description="View your portfolio breakdown")
@@ -203,29 +276,16 @@ class MusicCommands(commands.Cog):
         total_shares = sum(item['shares'] for item in breakdown)
         total_base = BASE_SHARE_VALUE * total_shares
         total_gain_percent = ((total_value - total_base) / total_base * 100) if total_base > 0 else 0.0
-        embed_color = discord.Color.green() if total_gain_percent >= 0 else discord.Color.red()
 
-        lines = []
-        for item in breakdown:
-            gain = item['gain_loss_percent']
-            gain_str = f"{gain:+.2f}%"
-            lines.append(f"**{item['artist_name']}** ×{item['shares']}\n💰 {item['current_value']:.2f}€ | 📈 {gain_str}")
-
-        body = "\n".join(lines)
-        embed = discord.Embed(
-            title=f"{interaction.user.name}'s Portfolio",
-            description=body,
-            color=embed_color
-        )
-
-        await interaction.followup.send(embed=embed)
+        view = PortfolioView(interaction.user.id, breakdown, total_value, total_shares, total_gain_percent, sort_by)
+        await interaction.followup.send(embed=view._build_embed(), view=view)
 
 
     @commands.command(name="leaderboard")
     async def prefix_leaderboard(self, ctx):
         from services.database import get_db
         conn = get_db()
-        rows = conn.execute('SELECT username, money FROM users ORDER BY money DESC').fetchall()
+        rows = conn.execute('SELECT discord_id, username FROM users').fetchall()
         conn.close()
 
         if not rows:
@@ -237,9 +297,17 @@ class MusicCommands(commands.Cog):
             await ctx.send(embed=embed)
             return
 
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+        leaderboard = []
+        for row in rows:
+            value, _ = await calculate_portfolio_value(row['discord_id'], today_str)
+            leaderboard.append((row['username'], value))
+
+        leaderboard.sort(key=lambda x: x[1], reverse=True)
+
         lines = []
-        for rank, row in enumerate(rows, start=1):
-            lines.append(f"**{rank}.** {row['username']} — {row['money']:.2f}€")
+        for rank, (username, value) in enumerate(leaderboard, start=1):
+            lines.append(f"**{rank}.** {username} — {value:.2f}€")
 
         embed = discord.Embed(
             title="Leaderboard",
@@ -253,7 +321,7 @@ class MusicCommands(commands.Cog):
     async def slash_leaderboard(self, interaction: discord.Interaction):
         from services.database import get_db
         conn = get_db()
-        rows = conn.execute('SELECT username, money FROM users ORDER BY money DESC').fetchall()
+        rows = conn.execute('SELECT discord_id, username FROM users').fetchall()
         conn.close()
 
         if not rows:
@@ -265,9 +333,18 @@ class MusicCommands(commands.Cog):
             await interaction.response.send_message(embed=embed)
             return
 
+        await interaction.response.defer()
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+        leaderboard = []
+        for row in rows:
+            value, _ = await calculate_portfolio_value(row['discord_id'], today_str)
+            leaderboard.append((row['username'], value))
+
+        leaderboard.sort(key=lambda x: x[1], reverse=True)
+
         lines = []
-        for rank, row in enumerate(rows, start=1):
-            lines.append(f"**{rank}.** {row['username']} — {row['money']:.2f}€")
+        for rank, (username, value) in enumerate(leaderboard, start=1):
+            lines.append(f"**{rank}.** {username} — {value:.2f}€")
 
         embed = discord.Embed(
             title="Leaderboard",
@@ -277,8 +354,8 @@ class MusicCommands(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
 
-    @commands.command(name="setlastfm")
-    async def prefix_setlastfm(self, ctx):
+    @commands.command(name="lastfm")
+    async def prefix_lastfm(self, ctx):
         try:
             lastfm_username = ctx.message.content.split(' ')[1]
             await validate_lastfm_user(lastfm_username)
@@ -290,8 +367,8 @@ class MusicCommands(commands.Cog):
             await ctx.send("Last.fm user not found.")
 
 
-    @app_commands.command(name="setlastfm", description="Set your Last.fm username")
-    async def slash_setlastfm(self, interaction: discord.Interaction, lastfm_username: str):
+    @app_commands.command(name="lastfm", description="Set your Last.fm username")
+    async def slash_lastfm(self, interaction: discord.Interaction, lastfm_username: str):
         try:
             await validate_lastfm_user(lastfm_username)
             insert_user(interaction.user.id, interaction.user.name, lastfm_username)
@@ -434,18 +511,62 @@ class MusicCommands(commands.Cog):
         await interaction.followup.send(embed=embed)
 
 
+    @commands.command(name="rules")
+    async def prefix_rules(self, ctx):
+        embed = discord.Embed(
+            title="📈 How to Play",
+            description=(
+                "**1.** Set your Last.fm with `/lastfm <username>`\n"
+                "**2.** Run `/claim` to buy shares from your recent scrobbles at that day's price\n"
+                "**3.** Run `/portfolio` to see your holdings\n"
+                "**4.** Run `/check` to update stale data\n\n"
+                "**How to profit:**\n"
+                "• An artist's share price = their Last.fm listener count\n"
+                "• When more people listen to an artist, the price goes up — your shares gain value\n"
+                "• The more scrobbles you have for an artist, the more shares you own\n"
+                "• Claim daily to keep accumulating shares\n"
+                "• Price changes happen once per day, so patience pays off"
+            ),
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed)
+
+
+    @app_commands.command(name="rules", description="How to play")
+    async def slash_rules(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="📈 How to Play",
+            description=(
+                "**1.** Set your Last.fm with `/lastfm <username>`\n"
+                "**2.** Run `/claim` to buy shares from your recent scrobbles at that day's price\n"
+                "**3.** Run `/portfolio` to see your holdings\n"
+                "**4.** Run `/check` to update stale data\n\n"
+                "**How to profit:**\n"
+                "• An artist's share price = their Last.fm listener count\n"
+                "• When more people listen to an artist, the price goes up — your shares gain value\n"
+                "• The more scrobbles you have for an artist, the more shares you own\n"
+                "• Claim daily to keep accumulating shares\n"
+                "• Price changes happen once per day, so patience pays off"
+            ),
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed)
+
+
     @app_commands.command(name="help", description="Show all commands")
     async def slash_help(self, interaction: discord.Interaction):
         help_message = (
             "**Available commands:**\n"
-            "claim - Claim your daily portfolio value\n"
-            "leaderboard - View the leaderboard\n"
-            "setlastfm <username> - Link your Last.fm account\n"
-            "check - Recalculate your portfolio value (1h cooldown)\n"
-            "portfolio - View your portfolio breakdown\n"
-            "artist <name> - Look up an artist's stock info\n"
-            "history <name> - View an artist's price history\n"
-            "help - Show all commands"
+            "/claim - Claim your daily portfolio value\n"
+            "/leaderboard - View the leaderboard\n"
+            "/lastfm <username> - Link your Last.fm account\n"
+            "/check - Recalculate your portfolio value (1h cooldown)\n"
+            "/balance - View your balance\n"
+            "/portfolio - View your portfolio breakdown\n"
+            "/artist <name> - Look up an artist's stock info\n"
+            "/history <name> - View an artist's price history\n"
+            "/rules - How to play\n"
+            "/help - Show all commands"
         )
         embed = discord.Embed(
             title="Help",

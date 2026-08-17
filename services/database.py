@@ -110,6 +110,16 @@ def update_user_money_and_claim(discord_id: int, money: float, last_claim: int):
     conn.close()
 
 
+def update_user_money(discord_id: int, money: float):
+    conn = get_db()
+    conn.execute(
+        'UPDATE users SET money = ? WHERE discord_id = ?',
+        (money, discord_id)
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_closest_snapshot(artist_name: str, target_date_str: str):
     conn = get_db()
     rows = conn.execute(
