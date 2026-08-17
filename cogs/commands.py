@@ -1,5 +1,10 @@
 import logging
 import datetime
+import os
+import tempfile
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -18,6 +23,41 @@ def format_listeners(count: int) -> str:
     if count >= 1_000:
         return f"{count / 1_000:.1f}k"
     return str(count)
+
+
+def generate_allocation_chart(breakdown: list[dict], total_value: float) -> str | None:
+    if len(breakdown) <= 1:
+        return None
+
+    sorted_items = sorted(breakdown, key=lambda x: x['current_value'], reverse=True)
+    top = sorted_items[:10]
+    other_value = sum(item['current_value'] for item in sorted_items[10:])
+
+    values = [item['current_value'] for item in top]
+    labels = [item['artist_name'] for item in top]
+    percentages = [v / total_value * 100 for v in values]
+
+    if other_value > 0:
+        values.append(other_value)
+        labels.append("Other")
+        percentages.append(other_value / total_value * 100)
+
+    colors = plt.cm.tab20(range(len(labels)))
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.pie(
+        values,
+        labels=[f"{l}\n{p:.1f}%" for l, p in zip(labels, percentages)],
+        colors=colors,
+        startangle=140,
+        textprops={'fontsize': 11}
+    )
+    ax.set_title("Portfolio Allocation", fontsize=16, fontweight='bold')
+
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+        plt.savefig(tmp.name, bbox_inches='tight', dpi=100)
+        plt.close(fig)
+        return tmp.name
 
 
 class PortfolioView(discord.ui.View):
@@ -201,6 +241,40 @@ class MusicCommands(commands.Cog):
 
         view = PortfolioView(interaction.user.id, breakdown, total_value, total_shares, total_gain_percent, sort_by)
         await interaction.followup.send(embed=view._build_embed(), view=view)
+
+
+    @app_commands.command(name="allocation", description="View your portfolio allocation as a pie chart")
+    async def slash_allocation(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id if interaction.guild else 0
+        user_row = get_user(interaction.user.id, guild_id)
+        if not user_row:
+            await interaction.response.send_message(
+                f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+        breakdown = await get_portfolio_breakdown(interaction.user.id, guild_id, today_str, sort_by="value")
+        if not breakdown:
+            await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
+            return
+
+        total_value = sum(item['current_value'] for item in breakdown)
+        chart_path = generate_allocation_chart(breakdown, total_value)
+        if chart_path:
+            embed = discord.Embed(
+                title="Portfolio Allocation",
+                description="Your holdings by artist value",
+                color=discord.Color.blue()
+            )
+            file = discord.File(chart_path, filename='allocation.png')
+            embed.set_image(url='attachment://allocation.png')
+            await interaction.followup.send(embed=embed, file=file)
+            os.unlink(chart_path)
+        else:
+            await interaction.followup.send("Need at least 2 artists to show allocation.")
 
 
     @app_commands.command(name="leaderboard", description="View the leaderboard")
@@ -451,6 +525,7 @@ class MusicCommands(commands.Cog):
             "/check - Recalculate your portfolio value (1h cooldown)\n"
             "/balance - View your balance\n"
             "/portfolio - View your portfolio breakdown\n"
+            "/allocation - View your portfolio allocation pie chart\n"
             "/artist <name> - Look up an artist's stock info\n"
             "/history <name> - View an artist's price history\n"
             "/transactions [artist] - View your transaction history\n"
@@ -458,7 +533,6 @@ class MusicCommands(commands.Cog):
             "/marketconfig - Configure daily market summary (admin)\n"
             "/rules - How to play\n"
             "/help - Show all commands\n"
-            "\nDaily summary at 9AM GMT: biggest winner and loser"
         )
         embed = discord.Embed(
             title="Help",
