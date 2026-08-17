@@ -15,7 +15,7 @@ from services.database import (
     insert_scrobble, update_user_money_and_claim,
     get_closest_snapshot, get_snapshot, upsert_snapshot, update_last_preview
 )
-from services.portfolio import listeners_to_euros, calculate_portfolio_value, get_portfolio_breakdown
+from services.portfolio import calculate_portfolio_value, get_portfolio_breakdown
 
 
 @pytest.fixture
@@ -27,13 +27,6 @@ def tmp_db(tmp_path):
     init_db()
     yield db_path
     db_module.DB_PATH = original_db_path
-
-
-def test_listeners_to_euros():
-    assert listeners_to_euros(100_000) == 1.0
-    assert listeners_to_euros(150_000) == 1.5
-    assert listeners_to_euros(0) == 0.0
-    assert listeners_to_euros(50_000) == 0.5
 
 
 def test_insert_and_get_user(tmp_db):
@@ -145,7 +138,7 @@ async def test_get_portfolio_breakdown(tmp_db):
     insert_scrobble(123456789, "Taylor Swift", "Anti-Hero", "Midnights", 15000000, "20260722")
     insert_scrobble(123456789, "Drake", "God's Plan", "Scorpion", 11975000, "20260723")
     upsert_snapshot("Taylor Swift", 15200000, "20260722")
-    upsert_snapshot("Drake", 12000000, "20260723")
+    upsert_snapshot("Drake", 12000000, "20260722")
 
     breakdown = await get_portfolio_breakdown(123456789, "20260722", sort_by="value")
     assert len(breakdown) == 2

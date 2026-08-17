@@ -1,6 +1,5 @@
 import asyncio
 import random
-import time
 import logging
 import pylast
 from config import network
@@ -54,25 +53,14 @@ async def fetch_recent_tracks(user, time_from=None, limit=200):
     return await _rate_limited_call(_fetch)
 
 
-async def get_artist_listener_count(artist_name: str) -> int:
+async def get_artist_listener_count(artist_name: str) -> tuple[int, str]:
     def _fetch():
         artist = pylast.Artist(artist_name, network)
-        return int(artist.get_listener_count())
+        response = artist._request("artist.getInfo")
+        canonical_name = pylast._extract(response, "name")
+        listeners = int(pylast._extract(response, "listeners"))
+        return listeners, canonical_name
     return await _rate_limited_call(_fetch)
-
-
-async def get_artist_canonical_name(artist_name: str) -> str | None:
-    def _fetch():
-        search = network.search_for_artist(artist_name)
-        results = search.get_next_page()
-        if results:
-            return results[0].name
-        return None
-    try:
-        return await _rate_limited_call(_fetch)
-    except Exception as e:
-        logger.error(f"Failed to resolve artist name for '{artist_name}': {e}")
-        return None
 
 
 async def validate_lastfm_user(lastfm_username: str):

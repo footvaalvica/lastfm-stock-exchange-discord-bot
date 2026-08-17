@@ -1,35 +1,14 @@
 import datetime
 import pylast
 from services.database import (
-    get_user, get_scrobbles, get_scrobbles_by_artist, insert_scrobble, update_user_money_and_claim,
-    get_closest_snapshot, get_snapshot, upsert_snapshot, get_db, update_artist_name_in_db
+    get_user, get_scrobbles, insert_scrobble, update_user_money_and_claim,
+    get_closest_snapshot, get_snapshot, upsert_snapshot,
+    get_total_scrobbles_for_artist
 )
-from services.lastfm import fetch_recent_tracks, get_artist_listener_count, get_artist_canonical_name
+from services.lastfm import fetch_recent_tracks, get_artist_listener_count
 
 
-LISTENERS_PER_EURO = 100_000
 BASE_SHARE_VALUE = 1.0
-
-
-def listeners_to_euros(listeners: int) -> float:
-    return listeners / LISTENERS_PER_EURO
-
-
-_canonical_name_cache: dict[str, str] = {}
-
-
-async def resolve_canonical_artist_name(artist_name: str) -> str:
-    if artist_name in _canonical_name_cache:
-        return _canonical_name_cache[artist_name]
-
-    canonical = await get_artist_canonical_name(artist_name)
-    resolved = canonical if canonical else artist_name
-
-    if resolved != artist_name:
-        update_artist_name_in_db(artist_name, resolved)
-
-    _canonical_name_cache[artist_name] = resolved
-    return resolved
 
 
 async def calculate_portfolio_value(discord_id: int, today_str: str) -> tuple[float, float]:
@@ -43,7 +22,8 @@ async def calculate_portfolio_value(discord_id: int, today_str: str) -> tuple[fl
     for row in rows:
         artist_name = row['artist_name']
         if artist_name not in today_prices:
-            today_prices[artist_name] = await get_or_create_daily_snapshot(artist_name, today_str)
+            price, _ = await get_or_create_daily_snapshot(artist_name, today_str)
+            today_prices[artist_name] = price
         current_price = today_prices[artist_name]
         purchase_price = row['purchase_price']
         if purchase_price <= 0:
@@ -59,15 +39,14 @@ async def calculate_portfolio_value(discord_id: int, today_str: str) -> tuple[fl
     return total_value, avg_gain_loss_percent
 
 
-async def get_or_create_daily_snapshot(artist_name: str, date_str: str) -> int:
-    canonical_name = await resolve_canonical_artist_name(artist_name)
-    existing = get_snapshot(canonical_name, date_str)
+async def get_or_create_daily_snapshot(artist_name: str, date_str: str) -> tuple[int, str]:
+    existing = get_snapshot(artist_name, date_str)
     if existing:
-        return existing['listeners']
+        return existing['listeners'], existing['artist_name']
 
-    listeners = await get_artist_listener_count(canonical_name)
+    listeners, canonical_name = await get_artist_listener_count(artist_name)
     upsert_snapshot(canonical_name, listeners, date_str)
-    return listeners
+    return listeners, canonical_name
 
 
 async def process_user_claim(user, discord_id: int) -> float:
@@ -94,17 +73,24 @@ async def process_user_claim(user, discord_id: int) -> float:
     new_scrobbles = []
     for scrobble in daily_scrobbles:
         artist_name = scrobble.track.artist.name
-        canonical_name = await resolve_canonical_artist_name(artist_name)
         scrobble_timestamp = datetime.datetime.fromtimestamp(
             int(scrobble.timestamp), datetime.timezone.utc
         ).date().isoformat().replace('-', '')
 
-        if use_today_price:
-            purchase_price = await get_or_create_daily_snapshot(canonical_name, today_str)
+        existing = get_snapshot(artist_name, today_str)
+        if existing:
+            canonical_name = existing['artist_name']
+            today_price = existing['listeners']
+        else:
+            today_price, canonical_name = await get_artist_listener_count(artist_name)
+            upsert_snapshot(canonical_name, today_price, today_str)
+
+        if use_today_price or scrobble_timestamp == today_str:
+            purchase_price = today_price
         else:
             purchase_price = get_closest_snapshot(canonical_name, scrobble_timestamp)
             if purchase_price is None:
-                purchase_price = await get_or_create_daily_snapshot(canonical_name, today_str)
+                purchase_price = today_price
 
         try:
             album = scrobble.track.get_album()
@@ -147,13 +133,7 @@ async def get_portfolio_breakdown(discord_id: int, today_str: str, sort_by: str 
 
     breakdown = []
     for artist_name, data in artist_data.items():
-        snapshot = get_snapshot(artist_name, today_str)
-        if snapshot:
-            current_price = snapshot['listeners']
-        else:
-            current_price = get_closest_snapshot(artist_name, today_str)
-            if current_price is None:
-                continue
+        current_price, canonical_name = await get_or_create_daily_snapshot(artist_name, today_str)
         avg_purchase = data['total_purchase'] / data['shares']
         if avg_purchase <= 0:
             current_value = BASE_SHARE_VALUE * data['shares']
@@ -162,7 +142,7 @@ async def get_portfolio_breakdown(discord_id: int, today_str: str, sort_by: str 
             current_value = BASE_SHARE_VALUE * (current_price / avg_purchase) * data['shares']
             gain_loss_percent = (current_price / avg_purchase - 1) * 100
         breakdown.append({
-            'artist_name': artist_name,
+            'artist_name': canonical_name,
             'shares': data['shares'],
             'avg_purchase_price': avg_purchase,
             'current_price': current_price,
@@ -181,35 +161,19 @@ async def get_portfolio_breakdown(discord_id: int, today_str: str, sort_by: str 
 
 
 async def get_artist_info(artist_name: str, today_str: str) -> dict | None:
-    canonical_name = await resolve_canonical_artist_name(artist_name)
-    rows = get_scrobbles_by_artist(canonical_name)
-    if not rows:
-        listeners = await get_or_create_daily_snapshot(canonical_name, today_str)
-        if listeners is None:
-            return None
-        rows = [{
-            'artist_name': canonical_name,
-            'purchase_price': listeners,
-        }]
-
-    snapshot = get_snapshot(canonical_name, today_str)
-    if snapshot:
-        current_price = snapshot['listeners']
+    existing = get_snapshot(artist_name, today_str)
+    if existing:
+        canonical_name = existing['artist_name']
     else:
-        current_price = get_closest_snapshot(canonical_name, today_str)
-        if current_price is None:
-            listeners = await get_or_create_daily_snapshot(canonical_name, today_str)
-            if listeners is None:
-                return None
-            current_price = listeners
+        listeners, canonical_name = await get_artist_listener_count(artist_name)
+        upsert_snapshot(canonical_name, listeners, today_str)
+        existing = get_snapshot(canonical_name, today_str)
 
-    base_price = rows[0]['purchase_price']
-    for row in rows:
-        if row['purchase_price'] < base_price:
-            base_price = row['purchase_price']
+    current_price = existing['listeners']
+    total_shares = get_total_scrobbles_for_artist(canonical_name)
+    base_price = current_price
 
     gain_loss_percent = ((current_price / base_price) - 1) * 100 if base_price > 0 else 0.0
-    total_shares = len(rows)
 
     return {
         'artist_name': canonical_name,

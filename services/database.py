@@ -39,6 +39,10 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_scrobbles_discord_id ON scrobbles(discord_id);
         CREATE INDEX IF NOT EXISTS idx_scrobbles_artist ON scrobbles(artist_name);
     ''')
+    try:
+        conn.execute('ALTER TABLE artist_popularity DROP COLUMN fetched_at')
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
@@ -84,16 +88,6 @@ def get_scrobbles(discord_id: int):
     return [dict(row) for row in rows]
 
 
-def get_scrobbles_by_artist(artist_name: str):
-    conn = get_db()
-    rows = conn.execute(
-        'SELECT artist_name, title, album, purchase_price, scrobble_date FROM scrobbles WHERE artist_name = ?',
-        (artist_name,)
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-
 def insert_scrobble(discord_id: int, artist_name: str, title: str, album: str, purchase_price: int, scrobble_date: str):
     conn = get_db()
     conn.execute(
@@ -134,11 +128,12 @@ def get_closest_snapshot(artist_name: str, target_date_str: str):
 def get_snapshot(artist_name: str, date_str: str):
     conn = get_db()
     row = conn.execute(
-        'SELECT listeners FROM artist_popularity WHERE artist_name = ? AND timestamp = ? COLLATE NOCASE',
+        'SELECT artist_name, listeners FROM artist_popularity WHERE artist_name = ? COLLATE NOCASE AND timestamp = ?',
         (artist_name, date_str)
     ).fetchone()
     conn.close()
-    return dict(row) if row else None
+    result = dict(row) if row else None
+    return result
 
 
 def upsert_snapshot(artist_name: str, listeners: int, timestamp: str):
@@ -151,28 +146,14 @@ def upsert_snapshot(artist_name: str, listeners: int, timestamp: str):
     conn.close()
 
 
-def get_scrobbles_by_artist(artist_name: str):
+def get_total_scrobbles_for_artist(artist_name: str) -> int:
     conn = get_db()
-    rows = conn.execute(
-        'SELECT artist_name, title, album, purchase_price, scrobble_date FROM scrobbles WHERE artist_name = ? COLLATE NOCASE',
+    row = conn.execute(
+        'SELECT COUNT(*) as cnt FROM scrobbles WHERE artist_name = ? COLLATE NOCASE',
         (artist_name,)
-    ).fetchall()
+    ).fetchone()
     conn.close()
-    return [dict(row) for row in rows]
-
-
-def update_artist_name_in_db(old_name: str, new_name: str):
-    conn = get_db()
-    conn.execute(
-        'UPDATE scrobbles SET artist_name = ? WHERE artist_name = ? COLLATE NOCASE',
-        (new_name, old_name)
-    )
-    conn.execute(
-        'UPDATE artist_popularity SET artist_name = ? WHERE artist_name = ? COLLATE NOCASE',
-        (new_name, old_name)
-    )
-    conn.commit()
-    conn.close()
+    return row['cnt'] if row else 0
 
 
 

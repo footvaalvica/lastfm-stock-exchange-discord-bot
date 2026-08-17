@@ -1,4 +1,5 @@
 import logging
+import datetime
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -36,7 +37,7 @@ class MusicCommands(commands.Cog):
         user = await get_lastfm_user(user_row['lastfm_username'])
         total_money, gain_loss = await process_user_claim(user, ctx.author.id)
         gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
-        await processing_msg.edit(content=f"{ctx.author.mention}, your portfolio is worth {total_money:.2f}€{gain_str}")
+        await processing_msg.edit(content=f"{ctx.author.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
 
 
     @app_commands.command(name="claim", description="Claim your daily portfolio value")
@@ -66,7 +67,7 @@ class MusicCommands(commands.Cog):
         user = await get_lastfm_user(user_row['lastfm_username'])
         total_money, gain_loss = await process_user_claim(user, interaction.user.id)
         gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
-        await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth {total_money:.2f}€{gain_str}")
+        await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
 
 
     @commands.command(name="check")
@@ -88,13 +89,12 @@ class MusicCommands(commands.Cog):
                 return
 
         logger.info("Checking portfolio for user: %s (admin=%s)", ctx.author.name, is_admin)
-        import datetime as dt
-        today_str = dt.datetime.now(dt.timezone.utc).date().isoformat().replace('-', '')
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         total_money, gain_loss = await calculate_portfolio_value(ctx.author.id, today_str)
         gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
         if not is_admin:
             update_last_preview(ctx.author.id, now_ts)
-        await ctx.send(f"{ctx.author.mention}, your portfolio is worth {total_money:.2f}€{gain_str}")
+        await ctx.send(f"{ctx.author.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
 
 
     @app_commands.command(name="check", description="Recalculate your portfolio value (1h cooldown, admin bypass)")
@@ -123,13 +123,12 @@ class MusicCommands(commands.Cog):
 
         await interaction.response.defer()
         logger.info("Checking portfolio for user: %s (admin=%s)", interaction.user.name, is_admin)
-        import datetime as dt
-        today_str = dt.datetime.now(dt.timezone.utc).date().isoformat().replace('-', '')
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         total_money, gain_loss = await calculate_portfolio_value(interaction.user.id, today_str)
         gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
         if not is_admin:
             update_last_preview(interaction.user.id, now_ts)
-        await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth {total_money:.2f}€{gain_str}")
+        await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
 
 
     @commands.command(name="portfolio")
@@ -139,8 +138,7 @@ class MusicCommands(commands.Cog):
             await ctx.send(f"{ctx.author.name}, set up your account first by setting your Last.fm username.")
             return
 
-        import datetime as dt
-        today_str = dt.datetime.now(dt.timezone.utc).date().isoformat().replace('-', '')
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         breakdown = await get_portfolio_breakdown(ctx.author.id, today_str, sort_by="value")
         if not breakdown:
             await ctx.send(f"{ctx.author.mention}, you have no shares yet.")
@@ -155,14 +153,8 @@ class MusicCommands(commands.Cog):
         lines = []
         for item in breakdown:
             gain = item['gain_loss_percent']
-            if gain > 0:
-                trend = "📈"
-            elif gain < 0:
-                trend = "📉"
-            else:
-                trend = "➡️"
             gain_str = f"{gain:+.2f}%"
-            lines.append(f"{trend} **{item['artist_name']}**\n　└ 💎 {item['current_value']:.2f}€ | 📈 {gain_str}")
+            lines.append(f"**{item['artist_name']}**\n💰 {item['current_value']:.2f}€ | 📈 {gain_str}")
 
         body = "\n".join(lines)
         embed = discord.Embed(
@@ -193,8 +185,7 @@ class MusicCommands(commands.Cog):
             return
 
         await interaction.response.defer()
-        import datetime as dt
-        today_str = dt.datetime.now(dt.timezone.utc).date().isoformat().replace('-', '')
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         breakdown = await get_portfolio_breakdown(interaction.user.id, today_str, sort_by=sort_by)
         if not breakdown:
             await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
@@ -209,14 +200,8 @@ class MusicCommands(commands.Cog):
         lines = []
         for item in breakdown:
             gain = item['gain_loss_percent']
-            if gain > 0:
-                trend = "📈"
-            elif gain < 0:
-                trend = "📉"
-            else:
-                trend = "➡️"
             gain_str = f"{gain:+.2f}%"
-            lines.append(f"{trend} **{item['artist_name']}**\n　└ 💎 {item['current_value']:.2f}€ | 📈 {gain_str}")
+            lines.append(f"**{item['artist_name']}**\n💰 {item['current_value']:.2f}€ | 📈 {gain_str}")
 
         body = "\n".join(lines)
         embed = discord.Embed(
@@ -236,13 +221,24 @@ class MusicCommands(commands.Cog):
         conn.close()
 
         if not rows:
-            await ctx.send("No users yet.")
+            embed = discord.Embed(
+                title="Leaderboard",
+                description="No users yet.",
+                color=discord.Color.gold()
+            )
+            await ctx.send(embed=embed)
             return
 
-        leaderboard_message = "Leaderboard:\n"
+        lines = []
         for rank, row in enumerate(rows, start=1):
-            leaderboard_message += f"{rank}. {row['username']}: {row['money']:.2f}€\n"
-        await ctx.send(leaderboard_message)
+            lines.append(f"**{rank}.** {row['username']} — {row['money']:.2f}€")
+
+        embed = discord.Embed(
+            title="Leaderboard",
+            description="\n".join(lines),
+            color=discord.Color.gold()
+        )
+        await ctx.send(embed=embed)
 
 
     @app_commands.command(name="leaderboard", description="View the leaderboard")
@@ -253,13 +249,24 @@ class MusicCommands(commands.Cog):
         conn.close()
 
         if not rows:
-            await interaction.response.send_message("No users yet.", ephemeral=True)
+            embed = discord.Embed(
+                title="Leaderboard",
+                description="No users yet.",
+                color=discord.Color.gold()
+            )
+            await interaction.response.send_message(embed=embed)
             return
 
-        leaderboard_message = "Leaderboard:\n"
+        lines = []
         for rank, row in enumerate(rows, start=1):
-            leaderboard_message += f"{rank}. {row['username']}: {row['money']:.2f}€\n"
-        await interaction.response.send_message(leaderboard_message)
+            lines.append(f"**{rank}.** {row['username']} — {row['money']:.2f}€")
+
+        embed = discord.Embed(
+            title="Leaderboard",
+            description="\n".join(lines),
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(embed=embed)
 
 
     @commands.command(name="setlastfm")
@@ -293,8 +300,7 @@ class MusicCommands(commands.Cog):
             await ctx.send("Please provide an artist name. Usage: `!artist <name>`")
             return
 
-        import datetime as dt
-        today_str = dt.datetime.now(dt.timezone.utc).date().isoformat().replace('-', '')
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         info = await get_artist_info(artist_name, today_str)
         if not info:
             await ctx.send(f"No data found for **{artist_name}**. It may not be tracked yet.")
@@ -308,18 +314,20 @@ class MusicCommands(commands.Cog):
         else:
             emoji = "➡️"
 
-        await ctx.send(
-            f"**{info['artist_name']}** {emoji}\n"
-            f"Base: {info['base_value']:.2f}€ | Now: {info['current_share_value']:.2f}€\n"
-            f"Total shares: {info['total_shares']}\n"
-            f"Change: {gain:+.2f}%"
+        embed = discord.Embed(
+            title=f"{info['artist_name']} {emoji}",
+            color=discord.Color.blue()
         )
+        embed.add_field(name="Value", value=f"{info['current_share_value']:.2f}€", inline=True)
+        embed.add_field(name="Shares", value=str(info['total_shares']), inline=True)
+        embed.add_field(name="Change", value=f"{gain:+.2f}%", inline=True)
+
+        await ctx.send(embed=embed)
 
 
     @app_commands.command(name="artist", description="Look up an artist's stock info")
     async def slash_artist(self, interaction: discord.Interaction, artist_name: str):
-        import datetime as dt
-        today_str = dt.datetime.now(dt.timezone.utc).date().isoformat().replace('-', '')
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         info = await get_artist_info(artist_name, today_str)
         if not info:
             await interaction.response.send_message(
@@ -336,27 +344,35 @@ class MusicCommands(commands.Cog):
         else:
             emoji = "➡️"
 
-        await interaction.response.send_message(
-            f"**{info['artist_name']}** {emoji}\n"
-            f"Base: {info['base_value']:.2f}€ | Now: {info['current_share_value']:.2f}€\n"
-            f"Total shares: {info['total_shares']}\n"
-            f"Change: {gain:+.2f}%"
+        embed = discord.Embed(
+            title=f"{info['artist_name']} {emoji}",
+            color=discord.Color.blue()
         )
+        embed.add_field(name="Value", value=f"{info['current_share_value']:.2f}€", inline=True)
+        embed.add_field(name="Shares", value=str(info['total_shares']), inline=True)
+        embed.add_field(name="Change", value=f"{gain:+.2f}%", inline=True)
+
+        await interaction.response.send_message(embed=embed)
 
 
     @app_commands.command(name="help", description="Show all commands")
     async def slash_help(self, interaction: discord.Interaction):
         help_message = (
-            "Available commands:\n"
+            "**Available commands:**\n"
             "/claim - Claim your daily portfolio value\n"
             "/leaderboard - View the leaderboard\n"
-            "/setlastfm <username> - Set your Last.fm username\n"
+            "/setlastfm <username> - Link your Last.fm account\n"
             "/check - Recalculate your portfolio value (1h cooldown)\n"
             "/portfolio - View your portfolio breakdown\n"
             "/artist <name> - Look up an artist's stock info\n"
             "/help - Show all commands"
         )
-        await interaction.response.send_message(help_message)
+        embed = discord.Embed(
+            title="Help",
+            description=help_message,
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed)
 
 
 async def setup(bot: commands.Bot):
