@@ -186,7 +186,7 @@ async def get_artist_price_history(artist_name: str, days: int = 30) -> list[dic
     return filtered
 
 
-async def get_artist_info(artist_name: str, today_str: str) -> dict | None:
+async def get_artist_info(artist_name: str, today_str: str, guild_id: int) -> dict | None:
     existing = get_snapshot(artist_name, today_str)
     if existing:
         canonical_name = existing['artist_name']
@@ -196,7 +196,7 @@ async def get_artist_info(artist_name: str, today_str: str) -> dict | None:
         existing = get_snapshot(canonical_name, today_str)
 
     current_price = existing['listeners']
-    total_shares = get_total_scrobbles_for_artist(canonical_name, guild_id=0)
+    total_shares = get_total_scrobbles_for_artist(canonical_name, guild_id=guild_id)
 
     yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
     yesterday_snapshot = get_snapshot(canonical_name, yesterday)
@@ -215,11 +215,11 @@ async def get_artist_info(artist_name: str, today_str: str) -> dict | None:
     }
 
 
-def get_market_overview() -> dict:
+def get_market_overview(guild_id: int = 0) -> dict:
     changes = get_price_changes(days=1)
     gainers = sorted([c for c in changes if c['change_percent'] > 0], key=lambda x: x['change_percent'], reverse=True)[:5]
     losers = sorted([c for c in changes if c['change_percent'] < 0], key=lambda x: x['change_percent'])[:5]
-    most_held = get_most_held_artists(limit=5, guild_id=0)
+    most_held = get_most_held_artists(limit=5, guild_id=guild_id)
     return {
         'gainers': gainers,
         'losers': losers,

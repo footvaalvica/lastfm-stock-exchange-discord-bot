@@ -247,7 +247,7 @@ class MusicCommands(commands.Cog):
 
         await interaction.response.defer()
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        breakdown = await get_portfolio_breakdown(interaction.user.id, guild_id, today_str, sort_by="value")
+        breakdown = await get_portfolio_breakdown(interaction.user.id, guild_id, today_str)
         if not breakdown:
             await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
             return
@@ -319,8 +319,9 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="artist", description="Look up an artist's stock info")
     async def slash_artist(self, interaction: discord.Interaction, artist_name: str):
+        guild_id = interaction.guild.id if interaction.guild else 0
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        info = await get_artist_info(artist_name, today_str)
+        info = await get_artist_info(artist_name, today_str, guild_id)
         if not info:
             await interaction.response.send_message(
                 f"No data found for **{artist_name}**. It may not be tracked yet.",
@@ -471,7 +472,7 @@ class MusicCommands(commands.Cog):
     async def slash_market(self, interaction: discord.Interaction):
         await interaction.response.defer()
         guild_id = interaction.guild.id if interaction.guild else 0
-        overview = get_market_overview()
+        overview = get_market_overview(guild_id)
 
         sections = []
 
