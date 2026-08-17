@@ -6,24 +6,23 @@ DB_PATH = 'db.sqlite3'
 def seed_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    
-    # Clear existing data
+
+    guild_id = 1
+
     conn.execute('DELETE FROM scrobbles')
     conn.execute('DELETE FROM users')
     conn.execute('DELETE FROM artist_popularity')
-    
-    # Sample users
+
     users = [
-        ('alice', 'alice_lastfm', 0, 0),
-        ('bob', 'bob_lastfm', 0, 0),
-        ('charlie', 'charlie_lastfm', 0, 0),
+        (123456789, guild_id, 'alice', 'alice_lastfm', 0, 0, 0),
+        (987654321, guild_id, 'bob', 'bob_lastfm', 0, 0, 0),
+        (555555555, guild_id, 'charlie', 'charlie_lastfm', 0, 0, 0),
     ]
     conn.executemany(
-        'INSERT INTO users (username, lastfm_username, money, last_claim) VALUES (?, ?, ?, ?)',
+        'INSERT INTO users (discord_id, guild_id, username, lastfm_username, money, last_claim, last_preview) VALUES (?, ?, ?, ?, ?, ?, ?)',
         users
     )
-    
-    # Sample artist popularity snapshots (listeners over time)
+
     today = datetime.datetime.now(datetime.timezone.utc).date()
     snapshots = []
     for days_ago in range(30, -1, -1):
@@ -40,51 +39,42 @@ def seed_db():
         'INSERT OR REPLACE INTO artist_popularity (artist_name, listeners, timestamp) VALUES (?, ?, ?)',
         snapshots
     )
-    
-    # Sample scrobbles (shares purchased at different prices/dates)
+
     scrobbles = []
     base_date = today - datetime.timedelta(days=25)
-    
-    # Alice's portfolio: mix of big and niche artists
+
     alice_scrobbles = [
-        ('Taylor Swift', 'Anti-Hero', 'Midnights', 15250000, (base_date).isoformat().replace('-', '')),
-        ('Drake', 'God\'s Plan', 'Scorpion', 11975000, (base_date + datetime.timedelta(days=1)).isoformat().replace('-', '')),
-        ('Radiohead', 'Karma Police', 'OK Computer', 4520000, (base_date + datetime.timedelta(days=2)).isoformat().replace('-', '')),
-        ('Death Grips', 'Guillotine', 'The Money Store', 351000, (base_date + datetime.timedelta(days=3)).isoformat().replace('-', '')),
-        ('Floating Points', 'LesAlpx', 'Crush', 121000, (base_date + datetime.timedelta(days=4)).isoformat().replace('-', '')),
+        (123456789, guild_id, 'Taylor Swift', 15250000, (base_date).isoformat().replace('-', ''), 1),
+        (123456789, guild_id, 'Drake', 11975000, (base_date + datetime.timedelta(days=1)).isoformat().replace('-', ''), 1),
+        (123456789, guild_id, 'Radiohead', 4520000, (base_date + datetime.timedelta(days=2)).isoformat().replace('-', ''), 1),
+        (123456789, guild_id, 'Death Grips', 351000, (base_date + datetime.timedelta(days=3)).isoformat().replace('-', ''), 1),
+        (123456789, guild_id, 'Floating Points', 121000, (base_date + datetime.timedelta(days=4)).isoformat().replace('-', ''), 1),
     ]
-    for s in alice_scrobbles:
-        scrobbles.append(('alice', *s))
-    
-    # Bob's portfolio: more niche focus
+    scrobbles.extend(alice_scrobbles)
+
     bob_scrobbles = [
-        ('Death Grips', 'Takyon', 'Death Grips', 349000, (base_date + datetime.timedelta(days=5)).isoformat().replace('-', '')),
-        ('Floating Points', 'Last Bloom', 'Crush', 119000, (base_date + datetime.timedelta(days=6)).isoformat().replace('-', '')),
-        ('Khruangbin', 'Maria También', 'The Universe Smiles Upon You', 802000, (base_date + datetime.timedelta(days=7)).isoformat().replace('-', '')),
-        ('Radiohead', 'Weird Fishes', 'In Rainbows', 4510000, (base_date + datetime.timedelta(days=8)).isoformat().replace('-', '')),
+        (987654321, guild_id, 'Death Grips', 349000, (base_date + datetime.timedelta(days=5)).isoformat().replace('-', ''), 1),
+        (987654321, guild_id, 'Floating Points', 119000, (base_date + datetime.timedelta(days=6)).isoformat().replace('-', ''), 1),
+        (987654321, guild_id, 'Khruangbin', 802000, (base_date + datetime.timedelta(days=7)).isoformat().replace('-', ''), 1),
+        (987654321, guild_id, 'Radiohead', 4510000, (base_date + datetime.timedelta(days=8)).isoformat().replace('-', ''), 1),
     ]
-    for s in bob_scrobbles:
-        scrobbles.append(('bob', *s))
-    
-    # Charlie's portfolio: one big artist, one that crashed
+    scrobbles.extend(bob_scrobbles)
+
     charlie_scrobbles = [
-        ('Taylor Swift', 'Cruel Summer', 'Lover', 15100000, (base_date + datetime.timedelta(days=9)).isoformat().replace('-', '')),
-        ('Drake', 'Hotline Bling', 'Views', 12050000, (base_date + datetime.timedelta(days=10)).isoformat().replace('-', '')),
+        (555555555, guild_id, 'Taylor Swift', 15100000, (base_date + datetime.timedelta(days=9)).isoformat().replace('-', ''), 1),
+        (555555555, guild_id, 'Drake', 12050000, (base_date + datetime.timedelta(days=10)).isoformat().replace('-', ''), 1),
     ]
-    for s in charlie_scrobbles:
-        scrobbles.append(('charlie', *s))
-    
+    scrobbles.extend(charlie_scrobbles)
+
     conn.executemany(
-        '''INSERT OR IGNORE INTO scrobbles
-           (username, artist_name, title, album, purchase_price, scrobble_date)
-           VALUES (?, ?, ?, ?, ?, ?)''',
+        'INSERT OR IGNORE INTO scrobbles (discord_id, guild_id, artist_name, purchase_price, scrobble_date, count) VALUES (?, ?, ?, ?, ?, ?)',
         scrobbles
     )
-    
+
     conn.commit()
     conn.close()
     print("Sample data inserted into db.sqlite3")
-    print("Users: alice, bob, charlie")
+    print("Users: alice (123456789), bob (987654321), charlie (555555555)")
     print(f"Artist snapshots: {len(snapshots)} entries across 6 artists over 30 days")
     print(f"Scrobbles: {len(scrobbles)} total")
 

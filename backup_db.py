@@ -20,12 +20,12 @@ def run_backup():
     shutil.copy2(DB_PATH, backup_path)
     print(f"Backup created: {backup_path}")
 
-    cutoff = datetime.datetime.now() - datetime.timedelta(days=RETENTION_DAYS)
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=RETENTION_DAYS)
     for fname in os.listdir(BACKUP_DIR):
         fpath = os.path.join(BACKUP_DIR, fname)
         if not os.path.isfile(fpath):
             continue
-        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(fpath))
+        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(fpath), tz=datetime.timezone.utc)
         if mtime < cutoff:
             os.remove(fpath)
             print(f"Deleted old backup: {fname}")

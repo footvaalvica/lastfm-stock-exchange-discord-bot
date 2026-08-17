@@ -1,7 +1,7 @@
 import datetime
 from services.database import (
-    get_user, get_scrobbles, insert_scrobble, update_user_money_and_claim,
-    get_closest_snapshot, get_snapshot, upsert_snapshot, get_db,
+    get_user, get_scrobbles, update_user_money_and_claim,
+    get_closest_snapshot, get_snapshot, get_latest_snapshot, get_db,
     get_total_scrobbles_for_artist, get_price_changes, get_most_held_artists
 )
 from services.lastfm import fetch_recent_tracks, get_artist_listener_count
@@ -10,8 +10,8 @@ from services.lastfm import fetch_recent_tracks, get_artist_listener_count
 BASE_SHARE_VALUE = 10.0
 
 
-async def calculate_portfolio_value(discord_id: int, guild_id: int, today_str: str) -> tuple[float, float]:
-    rows = get_scrobbles(discord_id, guild_id)
+def calculate_portfolio_value(discord_id: int, today_str: str) -> tuple[float, float]:
+    rows = get_scrobbles(discord_id)
     if not rows:
         return 0.0, 0.0
 
@@ -23,11 +23,21 @@ async def calculate_portfolio_value(discord_id: int, guild_id: int, today_str: s
         artist_name = row['artist_name']
         count = row['count']
         if artist_name not in today_prices:
-            price, _ = await get_or_create_daily_snapshot(artist_name, today_str)
-            today_prices[artist_name] = price
-        current_price = today_prices[artist_name]
+            current_price = 0
+            has_price_data = False
+            snapshot = get_snapshot(artist_name, today_str)
+            if snapshot:
+                current_price = snapshot['listeners']
+                has_price_data = True
+            else:
+                snapshot = get_latest_snapshot(artist_name)
+                if snapshot:
+                    current_price = snapshot['listeners']
+                    has_price_data = True
+            today_prices[artist_name] = (current_price, has_price_data)
+        current_price, has_price_data = today_prices[artist_name]
         purchase_price = row['purchase_price']
-        if purchase_price <= 0:
+        if not has_price_data or purchase_price <= 0:
             share_value = BASE_SHARE_VALUE * count
             gain_percent = 0.0
         else:
@@ -41,27 +51,44 @@ async def calculate_portfolio_value(discord_id: int, guild_id: int, today_str: s
     return total_value, avg_gain_loss_percent
 
 
-async def get_or_create_daily_snapshot(artist_name: str, date_str: str) -> tuple[int, str]:
-    existing = get_snapshot(artist_name, date_str)
-    if existing:
-        return existing['listeners'], existing['artist_name']
+def get_portfolio_value_at_date(discord_id: int, date_str: str) -> float:
+    rows = get_scrobbles(discord_id)
+    if not rows:
+        return 0.0
 
-    listeners, canonical_name = await get_artist_listener_count(artist_name)
-    upsert_snapshot(canonical_name, listeners, date_str)
-    return listeners, canonical_name
+    total_value = 0.0
+    seen_prices = {}
+    for row in rows:
+        artist_name = row['artist_name']
+        count = row['count']
+        purchase_price = row['purchase_price']
+
+        if artist_name not in seen_prices:
+            price = get_closest_snapshot(artist_name, date_str)
+            if price is None:
+                latest = get_latest_snapshot(artist_name)
+                price = latest['listeners'] if latest else 0
+            seen_prices[artist_name] = price
+
+        price = seen_prices[artist_name]
+        if price <= 0 or purchase_price <= 0:
+            total_value += BASE_SHARE_VALUE * count
+        else:
+            total_value += BASE_SHARE_VALUE * (price / purchase_price) * count
+
+    return total_value
 
 
-async def process_user_claim(user, discord_id: int, guild_id: int) -> float:
+async def process_user_claim(user, discord_id: int, guild_id: int) -> tuple[float, float]:
     now = datetime.datetime.now(datetime.timezone.utc)
     today_str = now.date().isoformat().replace('-', '')
     unix_timestamp = int(now.timestamp())
 
-    user_row = get_user(discord_id, guild_id)
+    user_row = get_user(discord_id)
     if not user_row:
-        return 0.0
+        return 0.0, 0.0
 
     last_claim = user_row['last_claim']
-    user_scrobbles = get_scrobbles(discord_id, guild_id)
 
     if last_claim == 0:
         time_from = int((now - datetime.timedelta(days=1)).timestamp())
@@ -82,6 +109,11 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> float:
         artist_plays[artist_name] = artist_plays.get(artist_name, 0) + 1
         artist_dates[artist_name] = scrobble_timestamp
 
+    canonical_names: dict[str, str] = {}
+    artist_purchase_prices: dict[str, int] = {}
+    artist_today_prices: dict[str, int] = {}
+    scrobbles_to_insert = []
+    snapshots_to_upsert = []
     for artist_name, play_count in artist_plays.items():
         scrobble_timestamp = artist_dates[artist_name]
         existing = get_snapshot(artist_name, today_str)
@@ -90,7 +122,9 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> float:
             today_price = existing['listeners']
         else:
             today_price, canonical_name = await get_artist_listener_count(artist_name)
-            upsert_snapshot(canonical_name, today_price, today_str)
+            snapshots_to_upsert.append((canonical_name, today_price, today_str))
+        canonical_names[artist_name] = canonical_name
+        artist_today_prices[artist_name] = today_price
 
         if use_today_price or scrobble_timestamp == today_str:
             purchase_price = today_price
@@ -98,20 +132,56 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> float:
             purchase_price = get_closest_snapshot(canonical_name, scrobble_timestamp)
             if purchase_price is None:
                 purchase_price = today_price
+        artist_purchase_prices[artist_name] = purchase_price
 
-        insert_scrobble(
-            discord_id, guild_id, canonical_name,
-            purchase_price, scrobble_timestamp, count=play_count
+        scrobbles_to_insert.append((discord_id, guild_id, canonical_name, purchase_price, scrobble_timestamp, play_count))
+
+    conn = get_db()
+    for canonical_name, today_price, ts in snapshots_to_upsert:
+        conn.execute(
+            'INSERT OR REPLACE INTO artist_popularity (artist_name, listeners, timestamp) VALUES (?, ?, ?)',
+            (canonical_name, today_price, ts)
         )
+    for discord_id, guild_id, canonical_name, purchase_price, scrobble_timestamp, play_count in scrobbles_to_insert:
+        conn.execute(
+            '''INSERT OR REPLACE INTO scrobbles
+               (guild_id, discord_id, artist_name, purchase_price, scrobble_date, count)
+               VALUES (?, ?, ?, ?, ?, COALESCE(
+                   (SELECT count FROM scrobbles WHERE guild_id = ? AND discord_id = ? AND artist_name = ? AND scrobble_date = ?),
+                   0
+               ) + ?)''',
+            (guild_id, discord_id, canonical_name, purchase_price, scrobble_timestamp,
+             guild_id, discord_id, canonical_name, scrobble_timestamp, play_count)
+        )
+    conn.commit()
+    conn.close()
 
-    total_money, gain_loss = await calculate_portfolio_value(discord_id, guild_id, today_str)
-    update_user_money_and_claim(discord_id, guild_id, total_money, unix_timestamp)
+    total_money = 0.0
+    total_gain_percent = 0.0
+    total_shares = 0
+    for artist_name, play_count in artist_plays.items():
+        canonical_name = canonical_names[artist_name]
+        current_price = artist_today_prices[artist_name]
+        purchase_price = artist_purchase_prices[artist_name]
 
-    return total_money, gain_loss
+        if purchase_price <= 0:
+            share_value = BASE_SHARE_VALUE * play_count
+            gain_percent = 0.0
+        else:
+            share_value = BASE_SHARE_VALUE * (current_price / purchase_price) * play_count
+            gain_percent = (current_price / purchase_price - 1) * 100
+        total_money += share_value
+        total_gain_percent += gain_percent * play_count
+        total_shares += play_count
+
+    avg_gain_loss_percent = (total_gain_percent / total_shares) if total_shares > 0 else 0.0
+    update_user_money_and_claim(discord_id, total_money, unix_timestamp)
+
+    return total_money, avg_gain_loss_percent
 
 
-async def get_portfolio_breakdown(discord_id: int, guild_id: int, today_str: str) -> list[dict]:
-    rows = get_scrobbles(discord_id, guild_id)
+def get_portfolio_breakdown(discord_id: int, today_str: str) -> list[dict]:
+    rows = get_scrobbles(discord_id)
     if not rows:
         return []
 
@@ -129,9 +199,22 @@ async def get_portfolio_breakdown(discord_id: int, guild_id: int, today_str: str
 
     breakdown = []
     for artist_name, data in artist_data.items():
-        current_price, canonical_name = await get_or_create_daily_snapshot(artist_name, today_str)
+        current_price = 0
+        canonical_name = artist_name
+        has_price_data = False
+        snapshot = get_snapshot(artist_name, today_str)
+        if snapshot:
+            current_price = snapshot['listeners']
+            canonical_name = snapshot['artist_name']
+            has_price_data = True
+        else:
+            snapshot = get_latest_snapshot(artist_name)
+            if snapshot:
+                current_price = snapshot['listeners']
+                canonical_name = snapshot['artist_name']
+                has_price_data = True
         avg_purchase = data['total_purchase'] / data['shares']
-        if avg_purchase <= 0:
+        if not has_price_data or avg_purchase <= 0:
             current_value = BASE_SHARE_VALUE * data['shares']
             gain_loss_percent = 0.0
         else:
@@ -151,24 +234,28 @@ async def get_portfolio_breakdown(discord_id: int, guild_id: int, today_str: str
     return breakdown
 
 
-async def get_artist_price_history(artist_name: str, days: int = 30) -> list[dict]:
+def get_artist_price_history(artist_name: str, days: int = 30) -> list[dict]:
     conn = get_db()
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    cutoff = (today - datetime.timedelta(days=days)).isoformat().replace('-', '')
     rows = conn.execute(
-        'SELECT artist_name, listeners, timestamp FROM artist_popularity WHERE artist_name = ? COLLATE NOCASE ORDER BY timestamp DESC',
-        (artist_name,)
+        '''SELECT artist_name, listeners, timestamp
+           FROM artist_popularity
+           WHERE artist_name = ? COLLATE NOCASE
+           AND timestamp >= ?
+           ORDER BY timestamp DESC''',
+        (artist_name, cutoff)
     ).fetchall()
     conn.close()
 
-    today = datetime.datetime.now(datetime.timezone.utc).date()
-    cutoff = (today - datetime.timedelta(days=days)).isoformat().replace('-', '')
     seen_dates = set()
     daily = []
     for row in rows:
         ts = row['timestamp']
-        if ts < cutoff or ts in seen_dates:
+        if ts in seen_dates:
             continue
-        daily.append({'date': ts, 'listeners': row['listeners'], 'artist_name': row['artist_name']})
         seen_dates.add(ts)
+        daily.append({'date': ts, 'listeners': row['listeners'], 'artist_name': row['artist_name']})
 
     daily.reverse()
 
@@ -192,7 +279,7 @@ async def get_artist_info(artist_name: str, today_str: str, guild_id: int) -> di
         existing = get_snapshot(canonical_name, today_str)
 
     current_price = existing['listeners']
-    total_shares = get_total_scrobbles_for_artist(canonical_name, guild_id=guild_id)
+    total_shares = get_total_scrobbles_for_artist(canonical_name)
 
     yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
     yesterday_snapshot = get_snapshot(canonical_name, yesterday)

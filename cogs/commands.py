@@ -8,13 +8,20 @@ import matplotlib.pyplot as plt
 import discord
 from discord import app_commands
 from discord.ext import commands
-from services.database import get_user, insert_user, update_last_preview, update_user_money, get_guild_config, set_guild_config, get_transactions
-from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview
+from services.database import get_user, insert_user, update_last_preview, update_user_money, set_guild_config, get_transactions, add_user_to_guild, get_scrobbles
+from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview, get_portfolio_value_at_date
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
 logger = logging.getLogger('lastfm_bot')
 
-PAGE_SIZE = 10
+PAGE_SIZE = 5
+
+
+def get_user_in_guild(discord_id: int, guild_id: int):
+    user_row = get_user(discord_id)
+    if user_row:
+        add_user_to_guild(discord_id, guild_id)
+    return user_row
 
 
 def format_listeners(count: int) -> str:
@@ -58,6 +65,98 @@ def generate_allocation_chart(breakdown: list[dict], total_value: float) -> str 
         plt.savefig(tmp.name, bbox_inches='tight', dpi=100)
         plt.close(fig)
         return tmp.name
+
+
+class TransactionsView(discord.ui.View):
+    def __init__(self, author_id: int, username: str, grouped: dict[str, list[dict]], artist_filter: str | None, page_size: int = 5):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.username = username
+        self.grouped = grouped
+        self.artist_filter = artist_filter
+        self.page_size = page_size
+        self.artists = list(grouped.keys())
+        self.total_pages = max(1, (len(self.artists) + page_size - 1) // page_size)
+        self.page = 0
+        if self.total_pages <= 1:
+            self.clear_items()
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.previous_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= self.total_pages - 1
+
+    def _build_embed(self) -> discord.Embed:
+        start = self.page * self.page_size
+        end = start + self.page_size
+        page_artists = self.artists[start:end]
+
+        lines = []
+        for artist in page_artists:
+            txs = self.grouped[artist]
+            if self.artist_filter:
+                lines.append(f"**{artist}**")
+                i = 0
+                while i < len(txs):
+                    tx = txs[i]
+                    date_fmt = datetime.datetime.strptime(tx['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
+                    count = 1
+                    while i + count < len(txs) and txs[i + count]['purchase_price'] == tx['purchase_price']:
+                        count += 1
+                    if count > 1:
+                        lines.append(f"  {date_fmt} x{count}")
+                    else:
+                        lines.append(f"  {date_fmt}")
+                    i += count
+            else:
+                lines.append(f"**{artist}** — ×{sum(tx['count'] for tx in txs)}")
+                i = 0
+                shown = 0
+                while i < len(txs) and shown < 3:
+                    tx = txs[i]
+                    date_fmt = datetime.datetime.strptime(tx['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
+                    count = 1
+                    while i + count < len(txs) and txs[i + count]['purchase_price'] == tx['purchase_price']:
+                        count += 1
+                    if count > 1:
+                        lines.append(f"  {date_fmt} x{count}")
+                    else:
+                        lines.append(f"  {date_fmt}")
+                    shown += count
+                    i += count
+                remaining = len(txs) - i
+                if remaining > 0:
+                    lines.append(f"  ...and {remaining} more")
+
+        body = "\n".join(lines)
+        embed = discord.Embed(
+            title=f"{self.username}'s Transactions",
+            description=body,
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text=f"Page {self.page + 1}/{self.total_pages}")
+        return embed
+
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+            self._update_buttons()
+            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page < self.total_pages - 1:
+            self.page += 1
+            self._update_buttons()
+            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
 
 
 class PortfolioView(discord.ui.View):
@@ -130,7 +229,7 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name="claim", description="Claim your daily portfolio value")
     async def slash_claim(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id if interaction.guild else 0
-        user_row = get_user(interaction.user.id, guild_id)
+        user_row = get_user_in_guild(interaction.user.id, guild_id)
         if not user_row:
             await interaction.response.send_message(
                 f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
@@ -152,7 +251,14 @@ class MusicCommands(commands.Cog):
 
         await interaction.response.defer()
         logger.info("Fetching money for user: %s", interaction.user.name)
-        user = await get_lastfm_user(user_row['lastfm_username'])
+        try:
+            user = await get_lastfm_user(user_row['lastfm_username'])
+        except Exception as e:
+            logger.error("Failed to fetch Last.fm user %s: %s", user_row['lastfm_username'], e)
+            await interaction.followup.send(
+                f"{interaction.user.mention}, could not reach Last.fm right now. Try again later."
+            )
+            return
         total_money, gain_loss = await process_user_claim(user, interaction.user.id, guild_id)
         gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
         await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
@@ -161,7 +267,7 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name="check", description="Recalculate your portfolio value (1h cooldown, admin bypass)")
     async def slash_check(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id if interaction.guild else 0
-        user_row = get_user(interaction.user.id, guild_id)
+        user_row = get_user_in_guild(interaction.user.id, guild_id)
         if not user_row:
             await interaction.response.send_message(
                 f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
@@ -186,31 +292,18 @@ class MusicCommands(commands.Cog):
         await interaction.response.defer()
         logger.info("Checking portfolio for user: %s (admin=%s)", interaction.user.name, is_admin)
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        total_money, gain_loss = await calculate_portfolio_value(interaction.user.id, guild_id, today_str)
+        total_money, gain_loss = calculate_portfolio_value(interaction.user.id, today_str)
         gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
-        update_user_money(interaction.user.id, guild_id, total_money)
+        update_user_money(interaction.user.id, total_money)
         if not is_admin:
-            update_last_preview(interaction.user.id, guild_id, now_ts)
+            update_last_preview(interaction.user.id, now_ts)
         await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
 
 
     @app_commands.command(name="balance", description="View your balance")
     async def slash_balance(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id if interaction.guild else 0
-        user_row = get_user(interaction.user.id, guild_id)
-        if not user_row:
-            await interaction.response.send_message(
-                f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
-                ephemeral=True
-            )
-            return
-        await interaction.response.send_message(f"{interaction.user.mention}, your portfolio is worth **{user_row['money']:.2f}€** (+0.00%)")
-
-
-    @app_commands.command(name="portfolio", description="View your portfolio breakdown")
-    async def slash_portfolio(self, interaction: discord.Interaction):
-        guild_id = interaction.guild.id if interaction.guild else 0
-        user_row = get_user(interaction.user.id, guild_id)
+        user_row = get_user_in_guild(interaction.user.id, guild_id)
         if not user_row:
             await interaction.response.send_message(
                 f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
@@ -220,7 +313,59 @@ class MusicCommands(commands.Cog):
 
         await interaction.response.defer()
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        breakdown = await get_portfolio_breakdown(interaction.user.id, guild_id, today_str)
+        yesterday_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+
+        total_money, overall_gain = calculate_portfolio_value(interaction.user.id, today_str)
+        yesterday_value = get_portfolio_value_at_date(interaction.user.id, yesterday_str)
+        today_change = ((total_money - yesterday_value) / yesterday_value * 100) if yesterday_value > 0 else None
+
+        total_shares = sum(row['count'] for row in get_scrobbles(interaction.user.id))
+        breakdown = get_portfolio_breakdown(interaction.user.id, today_str)
+
+        top_holding = breakdown[0]['artist_name'] if breakdown else "N/A"
+        diversity = len(breakdown) if breakdown else 0
+
+        embed = discord.Embed(
+            title="Portfolio Balance",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(name="💰 Value", value=f"{total_money:.2f}€", inline=True)
+        embed.add_field(name="📊 Shares", value=str(total_shares), inline=True)
+        embed.add_field(name="👨‍🎤 Artists", value=str(diversity), inline=True)
+
+        if overall_gain >= 0:
+            embed.add_field(name="📈 Overall", value=f"+{overall_gain:.2f}%", inline=True)
+        else:
+            embed.add_field(name="📉 Overall", value=f"{overall_gain:.2f}%", inline=True)
+
+        if today_change is not None:
+            if today_change >= 0:
+                embed.add_field(name="📅 Today", value=f"+{today_change:.2f}%", inline=True)
+            else:
+                embed.add_field(name="📅 Today", value=f"{today_change:.2f}%", inline=True)
+        else:
+            embed.add_field(name="📅 Today", value="N/A", inline=True)
+
+        embed.add_field(name="🏆 Top Holding", value=top_holding, inline=True)
+
+        await interaction.followup.send(embed=embed)
+
+
+    @app_commands.command(name="portfolio", description="View your portfolio breakdown")
+    async def slash_portfolio(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id if interaction.guild else 0
+        user_row = get_user_in_guild(interaction.user.id, guild_id)
+        if not user_row:
+            await interaction.response.send_message(
+                f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+        breakdown = get_portfolio_breakdown(interaction.user.id, today_str)
         if not breakdown:
             await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
             return
@@ -237,7 +382,7 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name="allocation", description="View your portfolio allocation as a pie chart")
     async def slash_allocation(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id if interaction.guild else 0
-        user_row = get_user(interaction.user.id, guild_id)
+        user_row = get_user_in_guild(interaction.user.id, guild_id)
         if not user_row:
             await interaction.response.send_message(
                 f"{interaction.user.name}, set up your account first by setting your Last.fm username.",
@@ -247,13 +392,18 @@ class MusicCommands(commands.Cog):
 
         await interaction.response.defer()
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        breakdown = await get_portfolio_breakdown(interaction.user.id, guild_id, today_str)
+        breakdown = get_portfolio_breakdown(interaction.user.id, today_str)
         if not breakdown:
             await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
             return
 
         total_value = sum(item['current_value'] for item in breakdown)
-        chart_path = generate_allocation_chart(breakdown, total_value)
+        try:
+            chart_path = generate_allocation_chart(breakdown, total_value)
+        except Exception as e:
+            logger.error("Failed to generate allocation chart: %s", e)
+            await interaction.followup.send("Could not generate chart right now. Try again later.")
+            return
         if chart_path:
             embed = discord.Embed(
                 title="Portfolio Allocation",
@@ -274,7 +424,15 @@ class MusicCommands(commands.Cog):
         await interaction.response.defer()
         from services.database import get_db
         conn = get_db()
-        rows = conn.execute('SELECT discord_id, username, guild_id FROM users WHERE guild_id = ?', (guild_id,)).fetchall()
+        rows = conn.execute(
+            '''SELECT u.username, u.money
+               FROM users u
+               JOIN user_guilds ug ON u.discord_id = ug.discord_id
+               WHERE ug.guild_id = ? AND u.money > 0
+               ORDER BY u.money DESC
+               LIMIT 10''',
+            (guild_id,)
+        ).fetchall()
         conn.close()
 
         if not rows:
@@ -286,17 +444,9 @@ class MusicCommands(commands.Cog):
             await interaction.followup.send(embed=embed)
             return
 
-        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        leaderboard = []
-        for row in rows:
-            value, _ = await calculate_portfolio_value(row['discord_id'], guild_id, today_str)
-            leaderboard.append((row['username'], value))
-
-        leaderboard.sort(key=lambda x: x[1], reverse=True)
-
         lines = []
-        for rank, (username, value) in enumerate(leaderboard, start=1):
-            lines.append(f"**{rank}.** {username} — {value:.2f}€")
+        for rank, row in enumerate(rows, start=1):
+            lines.append(f"**{rank}.** {row['username']} — {row['money']:.2f}€")
 
         embed = discord.Embed(
             title="Leaderboard",
@@ -313,15 +463,27 @@ class MusicCommands(commands.Cog):
             await validate_lastfm_user(lastfm_username)
             insert_user(interaction.user.id, guild_id, interaction.user.name, lastfm_username)
             await interaction.response.send_message(f"{interaction.user.mention}, your Last.fm username has been set to {lastfm_username}.")
-        except pylast.WSError:
-            await interaction.response.send_message("Last.fm user not found.", ephemeral=True)
+        except Exception as e:
+            logger.error("Failed to validate Last.fm user %s: %s", lastfm_username, e)
+            await interaction.response.send_message("Last.fm user not found or could not be reached.", ephemeral=True)
 
 
     @app_commands.command(name="artist", description="Look up an artist's stock info")
     async def slash_artist(self, interaction: discord.Interaction, artist_name: str):
+        if len(artist_name.strip()) == 0 or len(artist_name) > 100:
+            await interaction.response.send_message("Please provide a valid artist name.", ephemeral=True)
+            return
         guild_id = interaction.guild.id if interaction.guild else 0
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        info = await get_artist_info(artist_name, today_str, guild_id)
+        try:
+            info = await get_artist_info(artist_name, today_str, guild_id)
+        except Exception as e:
+            logger.error("Failed to fetch artist info for %s: %s", artist_name, e)
+            await interaction.response.send_message(
+                f"Could not look up **{artist_name}** right now. Try again later.",
+                ephemeral=True
+            )
+            return
         if not info:
             await interaction.response.send_message(
                 f"No data found for **{artist_name}**. It may not be tracked yet.",
@@ -350,8 +512,11 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="history", description="View an artist's listener history")
     async def slash_history(self, interaction: discord.Interaction, artist_name: str):
+        if len(artist_name.strip()) == 0 or len(artist_name) > 100:
+            await interaction.response.send_message("Please provide a valid artist name.", ephemeral=True)
+            return
         await interaction.response.defer()
-        history = await get_artist_price_history(artist_name)
+        history = get_artist_price_history(artist_name)
         if not history:
             await interaction.followup.send(f"No price history found for **{artist_name}**.")
             return
@@ -384,8 +549,7 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="transactions", description="View your transaction history")
     async def slash_transactions(self, interaction: discord.Interaction, artist_name: str = None):
-        guild_id = interaction.guild.id if interaction.guild else 0
-        rows = get_transactions(interaction.user.id, guild_id, artist_name)
+        rows = get_transactions(interaction.user.id, artist_name)
         if not rows:
             if artist_name:
                 await interaction.response.send_message(f"No transactions found for **{artist_name}**.", ephemeral=True)
@@ -400,51 +564,8 @@ class MusicCommands(commands.Cog):
                 grouped[name] = []
             grouped[name].append(row)
 
-        lines = []
-        for artist, txs in grouped.items():
-            if artist_name:
-                lines.append(f"**{artist}**")
-                i = 0
-                while i < len(txs):
-                    tx = txs[i]
-                    date_fmt = datetime.datetime.strptime(tx['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
-                    value = tx['purchase_price'] / 100_000
-                    count = 1
-                    while i + count < len(txs) and txs[i + count]['purchase_price'] == tx['purchase_price']:
-                        count += 1
-                    if count > 1:
-                        lines.append(f"  {date_fmt} x{count}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€)")
-                    else:
-                        lines.append(f"  {date_fmt}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€)")
-                    i += count
-            else:
-                lines.append(f"**{artist}** — {len(txs)} plays")
-                i = 0
-                shown = 0
-                while i < len(txs) and shown < 3:
-                    tx = txs[i]
-                    date_fmt = datetime.datetime.strptime(tx['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
-                    value = tx['purchase_price'] / 100_000
-                    count = 1
-                    while i + count < len(txs) and txs[i + count]['purchase_price'] == tx['purchase_price']:
-                        count += 1
-                    if count > 1:
-                        lines.append(f"  {date_fmt} x{count}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€)")
-                    else:
-                        lines.append(f"  {date_fmt}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€)")
-                    shown += count
-                    i += count
-                remaining = len(txs) - i
-                if remaining > 0:
-                    lines.append(f"  ...and {remaining} more")
-
-        body = "\n".join(lines)
-        embed = discord.Embed(
-            title=f"{interaction.user.name}'s Transactions",
-            description=body,
-            color=discord.Color.blue()
-        )
-        await interaction.response.send_message(embed=embed)
+        view = TransactionsView(interaction.user.id, interaction.user.name, grouped, artist_name)
+        await interaction.response.send_message(embed=view._build_embed(), view=view)
 
 
     @app_commands.command(name="rules", description="How to play")
@@ -524,7 +645,6 @@ class MusicCommands(commands.Cog):
             "/market - View market overview\n"
             "/marketconfig - Configure daily market summary (admin)\n"
             "/rules - How to play\n"
-            "/help - Show all commands\n"
         )
         embed = discord.Embed(
             title="Help",

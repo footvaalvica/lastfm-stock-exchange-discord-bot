@@ -19,15 +19,23 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+_last_sync_ts = 0
+
 
 @bot.event
 async def on_ready():
     init_db()
-    try:
-        synced = await bot.tree.sync()
-        logger.info('Synced %d slash command(s)', len(synced))
-    except Exception as e:
-        logger.error('Failed to sync slash commands: %s', e)
+    global _last_sync_ts
+    now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    if now_ts - _last_sync_ts >= 3600:
+        try:
+            synced = await bot.tree.sync()
+            logger.info('Synced %d slash command(s)', len(synced))
+            _last_sync_ts = now_ts
+        except Exception as e:
+            logger.error('Failed to sync slash commands: %s', e)
+    else:
+        logger.info('Skipping slash command sync; last sync was %ds ago', now_ts - _last_sync_ts)
     logger.info('Logged in as %s', bot.user)
     send_market_summary.start()
     daily_backup.start()
@@ -39,36 +47,12 @@ async def send_market_summary():
     if now_utc.minute != 0:
         return
 
-    overview = get_market_overview()
-    if not overview['gainers'] and not overview['losers']:
-        return
-
-    sections = []
-
-    if overview['gainers']:
-        lines = []
-        for entry in overview['gainers']:
-            lines.append(f"📈 **{entry['artist_name']}**: +{entry['change_percent']:.2f}%")
-        sections.append("**Today's Biggest Winner**\n" + "\n".join(lines[:1]))
-
-    if overview['losers']:
-        lines = []
-        for entry in overview['losers']:
-            lines.append(f"📉 **{entry['artist_name']}**: {entry['change_percent']:.2f}%")
-        sections.append("**Today's Biggest Loser**\n" + "\n".join(lines[:1]))
-
-    body = "\n\n".join(sections)
-    embed = discord.Embed(
-        title="Daily Market Summary",
-        description=body,
-        color=discord.Color.blue()
-    )
-
     for config in get_all_guild_configs():
         channel_id = config.get('market_channel_id')
         market_hour = config.get('market_hour_local')
         market_timezone = config.get('market_timezone', 'UTC')
-        if not channel_id or market_hour is None:
+        guild_id = config.get('guild_id')
+        if not channel_id or market_hour is None or guild_id is None:
             continue
 
         try:
@@ -79,6 +63,31 @@ async def send_market_summary():
 
         if local_now.hour != market_hour or local_now.minute != 0:
             continue
+
+        overview = get_market_overview(guild_id)
+        if not overview['gainers'] and not overview['losers']:
+            continue
+
+        sections = []
+
+        if overview['gainers']:
+            lines = []
+            for entry in overview['gainers']:
+                lines.append(f"📈 **{entry['artist_name']}**: +{entry['change_percent']:.2f}%")
+            sections.append("**Today's Biggest Winner**\n" + "\n".join(lines[:1]))
+
+        if overview['losers']:
+            lines = []
+            for entry in overview['losers']:
+                lines.append(f"📉 **{entry['artist_name']}**: {entry['change_percent']:.2f}%")
+            sections.append("**Today's Biggest Loser**\n" + "\n".join(lines[:1]))
+
+        body = "\n\n".join(sections)
+        embed = discord.Embed(
+            title="Daily Market Summary",
+            description=body,
+            color=discord.Color.blue()
+        )
 
         channel = bot.get_channel(channel_id)
         if not channel:

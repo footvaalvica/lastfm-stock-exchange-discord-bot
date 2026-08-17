@@ -19,21 +19,21 @@ gain_loss_percent = ((current_listeners / purchase_listeners) - 1) * 100
 
 ## Commands
 
-| Command | Description |
-| --- | --- |
-| `/claim` | Claim your portfolio value (24h cooldown) |
-| `/check` | Recalculate without claiming (1h cooldown, admin bypass) |
-| `/portfolio` | View your portfolio breakdown |
-| `/allocation` | View your portfolio as a pie chart |
-| `/artist <name>` | Look up an artist's stock info |
-| `/history <name>` | View an artist's listener price history |
-| `/transactions [artist]` | View your transaction history |
-| `/market` | Market overview: top gainers, losers, most held |
-| `/marketconfig` | Configure daily market summary channel and time (admin) |
-| `/lastfm <username>` | Link your Last.fm account |
-| `/leaderboard` | Top portfolios by value |
-| `/rules` | How to play |
-| `/help` | Show all commands |
+| Command                  | Description                                              |
+| ------------------------ | -------------------------------------------------------- |
+| `/claim`                 | Claim your portfolio value (24h cooldown)                |
+| `/check`                 | Recalculate without claiming (1h cooldown, admin bypass) |
+| `/portfolio`             | View your portfolio breakdown                            |
+| `/allocation`            | View your portfolio as a pie chart                       |
+| `/artist <name>`         | Look up an artist's stock info                           |
+| `/history <name>`        | View an artist's listener price history                  |
+| `/transactions [artist]` | View your transaction history                            |
+| `/market`                | Market overview: top gainers, losers, most held          |
+| `/marketconfig`          | Configure daily market summary channel and time (admin)  |
+| `/lastfm <username>`     | Link your Last.fm account                                |
+| `/leaderboard`           | Top portfolios by value                                  |
+| `/rules`                 | How to play                                              |
+| `/help`                  | Show all commands                                        |
 
 ## Setup
 
@@ -63,8 +63,6 @@ Edit `.env` with your credentials:
 LASTFM_API_KEY=your_key
 LASTFM_API_SECRET=your_secret
 DISCORD_TOKEN=your_token
-MARKET_CHANNEL_ID=your_channel_id
-MARKET_HOUR_UTC=9
 ```
 
 ### Run
@@ -94,7 +92,3 @@ Uses SQLite (`db.sqlite3`). Schema:
 ```bash
 python -m pytest tests/ -v
 ```
-
-## License
-
-MIT — see [LICENSE](LICENSE).
