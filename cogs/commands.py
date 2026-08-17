@@ -5,10 +5,18 @@ from discord import app_commands
 from discord.ext import commands
 import pylast
 from services.database import get_user, insert_user, update_last_preview
-from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info
+from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
 logger = logging.getLogger('lastfm_bot')
+
+
+def format_listeners(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
 
 
 class MusicCommands(commands.Cog):
@@ -154,7 +162,7 @@ class MusicCommands(commands.Cog):
         for item in breakdown:
             gain = item['gain_loss_percent']
             gain_str = f"{gain:+.2f}%"
-            lines.append(f"**{item['artist_name']}**\n💰 {item['current_value']:.2f}€ | 📈 {gain_str}")
+            lines.append(f"**{item['artist_name']}** ×{item['shares']}\n💰 {item['current_value']:.2f}€ | 📈 {gain_str}")
 
         body = "\n".join(lines)
         embed = discord.Embed(
@@ -201,7 +209,7 @@ class MusicCommands(commands.Cog):
         for item in breakdown:
             gain = item['gain_loss_percent']
             gain_str = f"{gain:+.2f}%"
-            lines.append(f"**{item['artist_name']}**\n💰 {item['current_value']:.2f}€ | 📈 {gain_str}")
+            lines.append(f"**{item['artist_name']}** ×{item['shares']}\n💰 {item['current_value']:.2f}€ | 📈 {gain_str}")
 
         body = "\n".join(lines)
         embed = discord.Embed(
@@ -355,17 +363,89 @@ class MusicCommands(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
 
+    @commands.command(name="history")
+    async def prefix_history(self, ctx, *, artist_name: str = None):
+        if not artist_name:
+            await ctx.send("Please provide an artist name. Usage: `!history <name>`")
+            return
+
+        history = await get_artist_price_history(artist_name)
+        if not history:
+            await ctx.send(f"No price history found for **{artist_name}**.")
+            return
+
+        lines = []
+        prev_listeners = None
+        for entry in history:
+            date_fmt = datetime.datetime.strptime(entry['date'], '%Y%m%d').strftime('%d/%m/%Y')
+            listeners = entry['listeners']
+            if prev_listeners is None:
+                trend = "➡️"
+            elif listeners > prev_listeners:
+                trend = "📈"
+            elif listeners < prev_listeners:
+                trend = "📉"
+            else:
+                trend = "➡️"
+            prev_listeners = listeners
+            value = listeners / 100_000
+            lines.append(f"{trend} {date_fmt}: {format_listeners(listeners)} listeners ({value:.2f}€)")
+
+        body = "\n".join(lines)
+        embed = discord.Embed(
+            title=f"Price History: {history[-1].get('artist_name', artist_name)}",
+            description=body,
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed)
+
+
+    @app_commands.command(name="history", description="View an artist's listener history")
+    async def slash_history(self, interaction: discord.Interaction, artist_name: str):
+        await interaction.response.defer()
+        history = await get_artist_price_history(artist_name)
+        if not history:
+            await interaction.followup.send(f"No price history found for **{artist_name}**.")
+            return
+
+        lines = []
+        prev_listeners = None
+        for entry in history:
+            date_fmt = datetime.datetime.strptime(entry['date'], '%Y%m%d').strftime('%d/%m/%Y')
+            listeners = entry['listeners']
+            if prev_listeners is None:
+                trend = "➡️"
+            elif listeners > prev_listeners:
+                trend = "📈"
+            elif listeners < prev_listeners:
+                trend = "📉"
+            else:
+                trend = "➡️"
+            prev_listeners = listeners
+            value = listeners / 100_000
+            lines.append(f"{trend} {date_fmt}: {format_listeners(listeners)} listeners ({value:.2f}€)")
+
+        body = "\n".join(lines)
+        embed = discord.Embed(
+            title=f"Price History: {history[-1].get('artist_name', artist_name)}",
+            description=body,
+            color=discord.Color.blue()
+        )
+        await interaction.followup.send(embed=embed)
+
+
     @app_commands.command(name="help", description="Show all commands")
     async def slash_help(self, interaction: discord.Interaction):
         help_message = (
             "**Available commands:**\n"
-            "/claim - Claim your daily portfolio value\n"
-            "/leaderboard - View the leaderboard\n"
-            "/setlastfm <username> - Link your Last.fm account\n"
-            "/check - Recalculate your portfolio value (1h cooldown)\n"
-            "/portfolio - View your portfolio breakdown\n"
-            "/artist <name> - Look up an artist's stock info\n"
-            "/help - Show all commands"
+            "claim - Claim your daily portfolio value\n"
+            "leaderboard - View the leaderboard\n"
+            "setlastfm <username> - Link your Last.fm account\n"
+            "check - Recalculate your portfolio value (1h cooldown)\n"
+            "portfolio - View your portfolio breakdown\n"
+            "artist <name> - Look up an artist's stock info\n"
+            "history <name> - View an artist's price history\n"
+            "help - Show all commands"
         )
         embed = discord.Embed(
             title="Help",

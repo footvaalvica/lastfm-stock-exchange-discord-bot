@@ -2,13 +2,13 @@ import datetime
 import pylast
 from services.database import (
     get_user, get_scrobbles, insert_scrobble, update_user_money_and_claim,
-    get_closest_snapshot, get_snapshot, upsert_snapshot,
+    get_closest_snapshot, get_snapshot, upsert_snapshot, get_db,
     get_total_scrobbles_for_artist
 )
 from services.lastfm import fetch_recent_tracks, get_artist_listener_count
 
 
-BASE_SHARE_VALUE = 1.0
+BASE_SHARE_VALUE = 10.0
 
 
 async def calculate_portfolio_value(discord_id: int, today_str: str) -> tuple[float, float]:
@@ -158,6 +158,37 @@ async def get_portfolio_breakdown(discord_id: int, today_str: str, sort_by: str 
         breakdown.sort(key=lambda x: x['shares'], reverse=True)
 
     return breakdown
+
+
+async def get_artist_price_history(artist_name: str, days: int = 30) -> list[dict]:
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT artist_name, listeners, timestamp FROM artist_popularity WHERE artist_name = ? COLLATE NOCASE ORDER BY timestamp DESC',
+        (artist_name,)
+    ).fetchall()
+    conn.close()
+
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    cutoff = (today - datetime.timedelta(days=days)).isoformat().replace('-', '')
+    seen_dates = set()
+    daily = []
+    for row in rows:
+        ts = row['timestamp']
+        if ts < cutoff or ts in seen_dates:
+            continue
+        daily.append({'date': ts, 'listeners': row['listeners'], 'artist_name': row['artist_name']})
+        seen_dates.add(ts)
+
+    daily.reverse()
+
+    filtered = []
+    prev_listeners = None
+    for entry in daily:
+        if prev_listeners is None or entry['listeners'] != prev_listeners:
+            filtered.append(entry)
+            prev_listeners = entry['listeners']
+
+    return filtered
 
 
 async def get_artist_info(artist_name: str, today_str: str) -> dict | None:
