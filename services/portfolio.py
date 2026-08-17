@@ -3,7 +3,7 @@ import pylast
 from services.database import (
     get_user, get_scrobbles, insert_scrobble, update_user_money_and_claim,
     get_closest_snapshot, get_snapshot, upsert_snapshot, get_db,
-    get_total_scrobbles_for_artist
+    get_total_scrobbles_for_artist, get_price_changes, get_most_held_artists
 )
 from services.lastfm import fetch_recent_tracks, get_artist_listener_count
 
@@ -202,7 +202,10 @@ async def get_artist_info(artist_name: str, today_str: str) -> dict | None:
 
     current_price = existing['listeners']
     total_shares = get_total_scrobbles_for_artist(canonical_name)
-    base_price = current_price
+
+    yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    yesterday_snapshot = get_snapshot(canonical_name, yesterday)
+    base_price = yesterday_snapshot['listeners'] if yesterday_snapshot else current_price
 
     gain_loss_percent = ((current_price / base_price) - 1) * 100 if base_price > 0 else 0.0
 
@@ -214,4 +217,16 @@ async def get_artist_info(artist_name: str, today_str: str) -> dict | None:
         'current_share_value': BASE_SHARE_VALUE * (current_price / base_price) if base_price > 0 else BASE_SHARE_VALUE,
         'gain_loss_percent': gain_loss_percent,
         'total_shares': total_shares,
+    }
+
+
+def get_market_overview() -> dict:
+    changes = get_price_changes(days=1)
+    gainers = sorted([c for c in changes if c['change_percent'] > 0], key=lambda x: x['change_percent'], reverse=True)[:5]
+    losers = sorted([c for c in changes if c['change_percent'] < 0], key=lambda x: x['change_percent'])[:5]
+    most_held = get_most_held_artists(limit=5)
+    return {
+        'gainers': gainers,
+        'losers': losers,
+        'most_held': most_held,
     }

@@ -4,7 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from services.database import get_user, insert_user, update_last_preview, update_user_money
-from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history
+from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
 logger = logging.getLogger('lastfm_bot')
@@ -331,6 +331,44 @@ class MusicCommands(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
 
+    @app_commands.command(name="market", description="View market overview: top gainers, losers, and most held artists")
+    async def slash_market(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        overview = get_market_overview()
+
+        sections = []
+
+        if overview['gainers']:
+            lines = []
+            for entry in overview['gainers']:
+                lines.append(f"📈 **{entry['artist_name']}**: {format_listeners(entry['today_listeners'])} (+{entry['change_percent']:.2f}%)")
+            sections.append("**Top Gainers**\n" + "\n".join(lines))
+
+        if overview['losers']:
+            lines = []
+            for entry in overview['losers']:
+                lines.append(f"📉 **{entry['artist_name']}**: {format_listeners(entry['today_listeners'])} ({entry['change_percent']:.2f}%)")
+            sections.append("**Top Losers**\n" + "\n".join(lines))
+
+        if overview['most_held']:
+            lines = []
+            for entry in overview['most_held']:
+                lines.append(f"🏦 **{entry['artist_name']}**: {entry['count']} shares")
+            sections.append("**Most Held**\n" + "\n".join(lines))
+
+        if not sections:
+            await interaction.followup.send("No market data available yet.")
+            return
+
+        body = "\n\n".join(sections)
+        embed = discord.Embed(
+            title="Market Overview",
+            description=body,
+            color=discord.Color.blue()
+        )
+        await interaction.followup.send(embed=embed)
+
+
     @app_commands.command(name="help", description="Show all commands")
     async def slash_help(self, interaction: discord.Interaction):
         help_message = (
@@ -343,6 +381,7 @@ class MusicCommands(commands.Cog):
             "/portfolio - View your portfolio breakdown\n"
             "/artist <name> - Look up an artist's stock info\n"
             "/history <name> - View an artist's price history\n"
+            "/market - View market overview\n"
             "/rules - How to play\n"
             "/help - Show all commands"
         )

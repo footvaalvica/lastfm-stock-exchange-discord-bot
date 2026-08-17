@@ -1,4 +1,5 @@
 import sqlite3
+import datetime
 from config import DB_PATH
 
 
@@ -164,6 +165,53 @@ def get_total_scrobbles_for_artist(artist_name: str) -> int:
     ).fetchone()
     conn.close()
     return row['cnt'] if row else 0
+
+
+def get_price_changes(days: int = 1) -> list[dict]:
+    conn = get_db()
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    past = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=days)).isoformat().replace('-', '')
+    rows = conn.execute(
+        '''SELECT
+            t1.artist_name,
+            t1.listeners as today_listeners,
+            t2.listeners as past_listeners
+           FROM artist_popularity t1
+           LEFT JOIN artist_popularity t2
+           ON t1.artist_name = t2.artist_name COLLATE NOCASE
+           AND t2.timestamp = ?
+           WHERE t1.timestamp = ?''',
+        (past, today)
+    ).fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        if row['past_listeners'] is None or row['today_listeners'] is None:
+            continue
+        change = row['today_listeners'] - row['past_listeners']
+        change_percent = (change / row['past_listeners'] * 100) if row['past_listeners'] > 0 else 0.0
+        result.append({
+            'artist_name': row['artist_name'],
+            'today_listeners': row['today_listeners'],
+            'past_listeners': row['past_listeners'],
+            'change': change,
+            'change_percent': change_percent,
+        })
+    return result
+
+
+def get_most_held_artists(limit: int = 5) -> list[dict]:
+    conn = get_db()
+    rows = conn.execute(
+        '''SELECT artist_name, COUNT(*) as count
+           FROM scrobbles
+           GROUP BY artist_name COLLATE NOCASE
+           ORDER BY count DESC
+           LIMIT ?''',
+        (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 
