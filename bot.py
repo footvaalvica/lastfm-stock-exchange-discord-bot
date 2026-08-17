@@ -6,6 +6,7 @@ from config import DISCORD_TOKEN
 from services.database import init_db, get_all_guild_configs
 from services.portfolio import get_market_overview
 from cogs.commands import setup as commands_setup
+from backup_db import run_backup
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +30,7 @@ async def on_ready():
         logger.error('Failed to sync slash commands: %s', e)
     logger.info('Logged in as %s', bot.user)
     send_market_summary.start()
+    daily_backup.start()
 
 
 @tasks.loop(minutes=1)
@@ -86,6 +88,19 @@ async def send_market_summary():
             await channel.send(embed=embed)
         except Exception as e:
             logger.error('Failed to send market summary to channel %d: %s', channel_id, e)
+
+
+@tasks.loop(hours=1)
+async def daily_backup():
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    if now_utc.hour != 3:
+        return
+
+    try:
+        run_backup()
+        logger.info('Daily database backup completed')
+    except Exception as e:
+        logger.error('Failed to create daily backup: %s', e)
 
 
 async def main():

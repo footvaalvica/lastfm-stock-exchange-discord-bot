@@ -1,0 +1,35 @@
+import datetime
+import os
+import shutil
+
+DB_PATH = 'db.sqlite3'
+BACKUP_DIR = 'backups'
+RETENTION_DAYS = 2
+
+
+def run_backup():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+
+    today = datetime.date.today().isoformat()
+    backup_name = f"db-{today}.sqlite3"
+    backup_path = os.path.join(BACKUP_DIR, backup_name)
+
+    if not os.path.exists(DB_PATH):
+        raise FileNotFoundError(f"Database not found at {DB_PATH}")
+
+    shutil.copy2(DB_PATH, backup_path)
+    print(f"Backup created: {backup_path}")
+
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=RETENTION_DAYS)
+    for fname in os.listdir(BACKUP_DIR):
+        fpath = os.path.join(BACKUP_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
+        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(fpath))
+        if mtime < cutoff:
+            os.remove(fpath)
+            print(f"Deleted old backup: {fname}")
+
+
+if __name__ == '__main__':
+    run_backup()
