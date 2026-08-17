@@ -1,5 +1,4 @@
 import datetime
-import pylast
 from services.database import (
     get_user, get_scrobbles, insert_scrobble, update_user_money_and_claim,
     get_closest_snapshot, get_snapshot, upsert_snapshot, get_db,
@@ -19,23 +18,26 @@ async def calculate_portfolio_value(discord_id: int, guild_id: int, today_str: s
     today_prices = {}
     total_value = 0.0
     total_gain_percent = 0.0
+    total_shares = 0
     for row in rows:
         artist_name = row['artist_name']
+        count = row['count']
         if artist_name not in today_prices:
             price, _ = await get_or_create_daily_snapshot(artist_name, today_str)
             today_prices[artist_name] = price
         current_price = today_prices[artist_name]
         purchase_price = row['purchase_price']
         if purchase_price <= 0:
-            share_value = BASE_SHARE_VALUE
+            share_value = BASE_SHARE_VALUE * count
             gain_percent = 0.0
         else:
-            share_value = BASE_SHARE_VALUE * (current_price / purchase_price)
+            share_value = BASE_SHARE_VALUE * (current_price / purchase_price) * count
             gain_percent = (current_price / purchase_price - 1) * 100
         total_value += share_value
-        total_gain_percent += gain_percent
+        total_gain_percent += gain_percent * count
+        total_shares += count
 
-    avg_gain_loss_percent = total_gain_percent / len(rows)
+    avg_gain_loss_percent = (total_gain_percent / total_shares) if total_shares > 0 else 0.0
     return total_value, avg_gain_loss_percent
 
 
@@ -70,13 +72,18 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> float:
 
     daily_scrobbles = await fetch_recent_tracks(user, time_from=time_from, limit=200)
 
-    new_scrobbles = []
+    artist_plays: dict[str, int] = {}
+    artist_dates: dict[str, str] = {}
     for scrobble in daily_scrobbles:
         artist_name = scrobble.track.artist.name
         scrobble_timestamp = datetime.datetime.fromtimestamp(
             int(scrobble.timestamp), datetime.timezone.utc
         ).date().isoformat().replace('-', '')
+        artist_plays[artist_name] = artist_plays.get(artist_name, 0) + 1
+        artist_dates[artist_name] = scrobble_timestamp
 
+    for artist_name, play_count in artist_plays.items():
+        scrobble_timestamp = artist_dates[artist_name]
         existing = get_snapshot(artist_name, today_str)
         if existing:
             canonical_name = existing['artist_name']
@@ -92,22 +99,10 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> float:
             if purchase_price is None:
                 purchase_price = today_price
 
-        try:
-            album = scrobble.track.get_album()
-            album_title = album.title if album is not None else "Single"
-        except pylast.WSError as e:
-            if "Track not found" in str(e):
-                album_title = "Unknown"
-            else:
-                raise
-
-        new_scrobbles.append((
-            discord_id, guild_id, canonical_name, scrobble.track.title,
-            album_title, purchase_price, scrobble_timestamp
-        ))
-
-    for s in new_scrobbles:
-        insert_scrobble(*s)
+        insert_scrobble(
+            discord_id, guild_id, canonical_name,
+            purchase_price, scrobble_timestamp, count=play_count
+        )
 
     total_money, gain_loss = await calculate_portfolio_value(discord_id, guild_id, today_str)
     update_user_money_and_claim(discord_id, guild_id, total_money, unix_timestamp)
@@ -123,13 +118,14 @@ async def get_portfolio_breakdown(discord_id: int, guild_id: int, today_str: str
     artist_data = {}
     for row in rows:
         artist_name = row['artist_name']
+        count = row['count']
         if artist_name not in artist_data:
             artist_data[artist_name] = {
                 'shares': 0,
                 'total_purchase': 0,
             }
-        artist_data[artist_name]['shares'] += 1
-        artist_data[artist_name]['total_purchase'] += row['purchase_price']
+        artist_data[artist_name]['shares'] += count
+        artist_data[artist_name]['total_purchase'] += row['purchase_price'] * count
 
     breakdown = []
     for artist_name, data in artist_data.items():

@@ -32,12 +32,11 @@ def init_db():
             guild_id INTEGER NOT NULL DEFAULT 0,
             discord_id INTEGER NOT NULL,
             artist_name TEXT NOT NULL,
-            title TEXT,
-            album TEXT,
             purchase_price INTEGER,
             scrobble_date TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 1,
             FOREIGN KEY (discord_id) REFERENCES users(discord_id),
-            UNIQUE(guild_id, discord_id, artist_name, title, scrobble_date)
+            UNIQUE(guild_id, discord_id, artist_name, scrobble_date)
         )
     ''')
 
@@ -69,6 +68,40 @@ def init_db():
         pass
     try:
         conn.execute('ALTER TABLE scrobbles ADD COLUMN guild_id INTEGER DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute('ALTER TABLE scrobbles ADD COLUMN count INTEGER DEFAULT 1')
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cols = [c[1] for c in conn.execute('PRAGMA table_info(scrobbles)').fetchall()]
+        if 'title' in cols or 'album' in cols:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS scrobbles_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL DEFAULT 0,
+                    discord_id INTEGER NOT NULL,
+                    artist_name TEXT NOT NULL,
+                    purchase_price INTEGER,
+                    scrobble_date TEXT NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY (discord_id) REFERENCES users(discord_id),
+                    UNIQUE(guild_id, discord_id, artist_name, scrobble_date)
+                )
+            ''')
+            conn.execute('''
+                INSERT OR IGNORE INTO scrobbles_new (id, guild_id, discord_id, artist_name, purchase_price, scrobble_date, count)
+                SELECT id, guild_id, discord_id, artist_name, purchase_price, scrobble_date, COUNT(*) as count
+                FROM scrobbles
+                GROUP BY guild_id, discord_id, artist_name, scrobble_date
+            ''')
+            conn.execute('DROP TABLE scrobbles')
+            conn.execute('ALTER TABLE scrobbles_new RENAME TO scrobbles')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_scrobbles_guild ON scrobbles(guild_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_scrobbles_discord_id ON scrobbles(discord_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_scrobbles_artist ON scrobbles(artist_name)')
     except sqlite3.OperationalError:
         pass
     try:
@@ -133,7 +166,7 @@ def update_last_preview(discord_id: int, guild_id: int, timestamp: int):
 def get_scrobbles(discord_id: int, guild_id: int):
     conn = get_db()
     rows = conn.execute(
-        'SELECT artist_name, title, album, purchase_price, scrobble_date FROM scrobbles WHERE discord_id = ? AND guild_id = ?',
+        'SELECT artist_name, purchase_price, scrobble_date, count FROM scrobbles WHERE discord_id = ? AND guild_id = ?',
         (discord_id, guild_id)
     ).fetchall()
     conn.close()
@@ -144,7 +177,7 @@ def get_transactions(discord_id: int, guild_id: int, artist_name: str | None = N
     conn = get_db()
     if artist_name:
         rows = conn.execute(
-            '''SELECT artist_name, title, album, purchase_price, scrobble_date
+            '''SELECT artist_name, purchase_price, scrobble_date, count
                FROM scrobbles
                WHERE discord_id = ? AND guild_id = ? AND artist_name = ? COLLATE NOCASE
                ORDER BY scrobble_date DESC''',
@@ -152,7 +185,7 @@ def get_transactions(discord_id: int, guild_id: int, artist_name: str | None = N
         ).fetchall()
     else:
         rows = conn.execute(
-            '''SELECT artist_name, title, album, purchase_price, scrobble_date
+            '''SELECT artist_name, purchase_price, scrobble_date, count
                FROM scrobbles
                WHERE discord_id = ? AND guild_id = ?
                ORDER BY scrobble_date DESC''',
@@ -162,13 +195,17 @@ def get_transactions(discord_id: int, guild_id: int, artist_name: str | None = N
     return [dict(row) for row in rows]
 
 
-def insert_scrobble(discord_id: int, guild_id: int, artist_name: str, title: str, album: str, purchase_price: int, scrobble_date: str):
+def insert_scrobble(discord_id: int, guild_id: int, artist_name: str, purchase_price: int, scrobble_date: str, count: int = 1):
     conn = get_db()
     conn.execute(
-        '''INSERT OR IGNORE INTO scrobbles
-           (guild_id, discord_id, artist_name, title, album, purchase_price, scrobble_date)
-           VALUES (?, ?, ?, ?, ?, ?, ?)''',
-        (guild_id, discord_id, artist_name, title, album, purchase_price, scrobble_date)
+        '''INSERT OR REPLACE INTO scrobbles
+           (guild_id, discord_id, artist_name, purchase_price, scrobble_date, count)
+           VALUES (?, ?, ?, ?, ?, COALESCE(
+               (SELECT count FROM scrobbles WHERE guild_id = ? AND discord_id = ? AND artist_name = ? AND scrobble_date = ?),
+               0
+           ) + ?)''',
+        (guild_id, discord_id, artist_name, purchase_price, scrobble_date,
+         guild_id, discord_id, artist_name, scrobble_date, count)
     )
     conn.commit()
     conn.close()
@@ -277,7 +314,7 @@ def get_most_held_artists(limit: int = 5, guild_id: int = 0) -> list[dict]:
     conn = get_db()
     if guild_id == 0:
         rows = conn.execute(
-            '''SELECT artist_name, COUNT(*) as count
+            '''SELECT artist_name, SUM(count) as count
                FROM scrobbles
                GROUP BY artist_name COLLATE NOCASE
                ORDER BY count DESC
@@ -286,7 +323,7 @@ def get_most_held_artists(limit: int = 5, guild_id: int = 0) -> list[dict]:
         ).fetchall()
     else:
         rows = conn.execute(
-            '''SELECT artist_name, COUNT(*) as count
+            '''SELECT artist_name, SUM(count) as count
                FROM scrobbles
                WHERE guild_id = ?
                GROUP BY artist_name COLLATE NOCASE

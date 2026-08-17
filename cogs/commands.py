@@ -415,7 +415,7 @@ class MusicCommands(commands.Cog):
                     if count > 1:
                         lines.append(f"  {date_fmt} x{count}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€)")
                     else:
-                        lines.append(f"  {date_fmt}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€) — *{tx['title']}*")
+                        lines.append(f"  {date_fmt}: {format_listeners(tx['purchase_price'])} listeners ({value:.2f}€)")
                     i += count
             else:
                 lines.append(f"**{artist}** — {len(txs)} plays")
