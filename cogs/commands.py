@@ -3,7 +3,7 @@ import datetime
 import discord
 from discord import app_commands
 from discord.ext import commands
-from services.database import get_user, insert_user, update_last_preview, update_user_money
+from services.database import get_user, insert_user, update_last_preview, update_user_money, get_bot_config, set_bot_config
 from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
@@ -382,8 +382,10 @@ class MusicCommands(commands.Cog):
             "/artist <name> - Look up an artist's stock info\n"
             "/history <name> - View an artist's price history\n"
             "/market - View market overview\n"
+            "/marketconfig - Configure daily market summary (admin)\n"
             "/rules - How to play\n"
-            "/help - Show all commands"
+            "/help - Show all commands\n"
+            "\nDaily summary at 9AM GMT: biggest winner and loser"
         )
         embed = discord.Embed(
             title="Help",
@@ -391,6 +393,26 @@ class MusicCommands(commands.Cog):
             color=discord.Color.blue()
         )
         await interaction.response.send_message(embed=embed)
+
+
+    @app_commands.command(name="marketconfig", description="Configure the daily market summary channel and time (admin only)")
+    @app_commands.choices(time=[
+        app_commands.Choice(name=f"{h:02d}:00 UTC", value=f"{h:02d}:00") for h in range(24)
+    ])
+    async def slash_marketconfig(self, interaction: discord.Interaction, channel: discord.TextChannel, time: str):
+        is_admin = interaction.user.guild_permissions.administrator if interaction.guild else False
+        if not is_admin:
+            await interaction.response.send_message("You need administrator permissions to use this command.", ephemeral=True)
+            return
+
+        hour = int(time.split(':')[0])
+        set_bot_config('market_channel_id', str(channel.id))
+        set_bot_config('market_hour_utc', str(hour))
+
+        await interaction.response.send_message(
+            f"Daily market summary configured: channel {channel.mention}, time {time} UTC",
+            ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot):

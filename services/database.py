@@ -39,6 +39,10 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_scrobbles_discord_id ON scrobbles(discord_id);
         CREATE INDEX IF NOT EXISTS idx_scrobbles_artist ON scrobbles(artist_name);
+        CREATE TABLE IF NOT EXISTS bot_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
     ''')
     try:
         conn.execute('ALTER TABLE artist_popularity DROP COLUMN fetched_at')
@@ -212,6 +216,23 @@ def get_most_held_artists(limit: int = 5) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def get_bot_config(key: str) -> str | None:
+    conn = get_db()
+    row = conn.execute('SELECT value FROM bot_config WHERE key = ?', (key,)).fetchone()
+    conn.close()
+    return row['value'] if row else None
+
+
+def set_bot_config(key: str, value: str):
+    conn = get_db()
+    conn.execute(
+        'INSERT OR REPLACE INTO bot_config (key, value) VALUES (?, ?)',
+        (key, value)
+    )
+    conn.commit()
+    conn.close()
 
 
 
