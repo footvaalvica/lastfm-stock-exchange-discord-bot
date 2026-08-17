@@ -152,19 +152,13 @@ async def test_get_portfolio_breakdown(tmp_db):
     upsert_snapshot("Taylor Swift", 15200000, "20260722")
     upsert_snapshot("Drake", 12000000, "20260722")
 
-    breakdown = await get_portfolio_breakdown(123456789, GUILD_ID, "20260722", sort_by="value")
+    breakdown = await get_portfolio_breakdown(123456789, GUILD_ID, "20260722")
     assert len(breakdown) == 2
     assert breakdown[0]['artist_name'] == "Taylor Swift"
     assert breakdown[0]['shares'] == 1
     assert breakdown[0]['current_value'] == pytest.approx(10.1333, abs=1e-3)
     assert breakdown[1]['artist_name'] == "Drake"
     assert breakdown[1]['current_value'] == pytest.approx(10.0209, abs=1e-3)
-
-    breakdown_by_price = await get_portfolio_breakdown(123456789, GUILD_ID, "20260722", sort_by="price")
-    assert breakdown_by_price[0]['artist_name'] == "Taylor Swift"
-
-    breakdown_by_quantity = await get_portfolio_breakdown(123456789, GUILD_ID, "20260722", sort_by="quantity")
-    assert breakdown_by_quantity[0]['shares'] == 1
 
 
 @pytest.mark.asyncio

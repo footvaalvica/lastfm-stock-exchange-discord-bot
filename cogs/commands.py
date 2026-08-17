@@ -61,14 +61,13 @@ def generate_allocation_chart(breakdown: list[dict], total_value: float) -> str 
 
 
 class PortfolioView(discord.ui.View):
-    def __init__(self, author_id: int, breakdown: list[dict], total_value: float, total_shares: int, total_gain_percent: float, sort_by: str):
+    def __init__(self, author_id: int, breakdown: list[dict], total_value: float, total_shares: int, total_gain_percent: float):
         super().__init__(timeout=180)
         self.author_id = author_id
         self.breakdown = breakdown
         self.total_value = total_value
         self.total_shares = total_shares
         self.total_gain_percent = total_gain_percent
-        self.sort_by = sort_by
         self.page = 0
         self.total_pages = max(1, (len(breakdown) + PAGE_SIZE - 1) // PAGE_SIZE)
         if self.total_pages <= 1:
@@ -209,7 +208,7 @@ class MusicCommands(commands.Cog):
 
 
     @app_commands.command(name="portfolio", description="View your portfolio breakdown")
-    async def slash_portfolio(self, interaction: discord.Interaction, sort_by: str = "value"):
+    async def slash_portfolio(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id if interaction.guild else 0
         user_row = get_user(interaction.user.id, guild_id)
         if not user_row:
@@ -219,17 +218,9 @@ class MusicCommands(commands.Cog):
             )
             return
 
-        valid_sorts = ["value", "price", "quantity"]
-        if sort_by not in valid_sorts:
-            await interaction.response.send_message(
-                f"Invalid sort option. Use: {', '.join(valid_sorts)}",
-                ephemeral=True
-            )
-            return
-
         await interaction.response.defer()
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        breakdown = await get_portfolio_breakdown(interaction.user.id, guild_id, today_str, sort_by=sort_by)
+        breakdown = await get_portfolio_breakdown(interaction.user.id, guild_id, today_str)
         if not breakdown:
             await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
             return
@@ -239,7 +230,7 @@ class MusicCommands(commands.Cog):
         total_base = BASE_SHARE_VALUE * total_shares
         total_gain_percent = ((total_value - total_base) / total_base * 100) if total_base > 0 else 0.0
 
-        view = PortfolioView(interaction.user.id, breakdown, total_value, total_shares, total_gain_percent, sort_by)
+        view = PortfolioView(interaction.user.id, breakdown, total_value, total_shares, total_gain_percent)
         await interaction.followup.send(embed=view._build_embed(), view=view)
 
 

@@ -115,7 +115,7 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> float:
     return total_money, gain_loss
 
 
-async def get_portfolio_breakdown(discord_id: int, guild_id: int, today_str: str, sort_by: str = "value"):
+async def get_portfolio_breakdown(discord_id: int, guild_id: int, today_str: str) -> list[dict]:
     rows = get_scrobbles(discord_id, guild_id)
     if not rows:
         return []
@@ -150,12 +150,7 @@ async def get_portfolio_breakdown(discord_id: int, guild_id: int, today_str: str
             'gain_loss_percent': gain_loss_percent,
         })
 
-    if sort_by == "value":
-        breakdown.sort(key=lambda x: x['current_value'], reverse=True)
-    elif sort_by == "price":
-        breakdown.sort(key=lambda x: x['current_price'], reverse=True)
-    elif sort_by == "quantity":
-        breakdown.sort(key=lambda x: x['shares'], reverse=True)
+    breakdown.sort(key=lambda x: x['current_value'], reverse=True)
 
     return breakdown
 
