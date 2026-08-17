@@ -31,6 +31,8 @@ class PortfolioView(discord.ui.View):
         self.sort_by = sort_by
         self.page = 0
         self.total_pages = max(1, (len(breakdown) + PAGE_SIZE - 1) // PAGE_SIZE)
+        if self.total_pages <= 1:
+            self.clear_items()
         self._update_buttons()
 
     def _update_buttons(self):
@@ -199,6 +201,7 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="leaderboard", description="View the leaderboard")
     async def slash_leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         from services.database import get_db
         conn = get_db()
         rows = conn.execute('SELECT discord_id, username FROM users').fetchall()
@@ -210,10 +213,9 @@ class MusicCommands(commands.Cog):
                 description="No users yet.",
                 color=discord.Color.gold()
             )
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed)
             return
 
-        await interaction.response.defer()
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
         leaderboard = []
         for row in rows:
@@ -231,7 +233,7 @@ class MusicCommands(commands.Cog):
             description="\n".join(lines),
             color=discord.Color.gold()
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
 
     @app_commands.command(name="lastfm", description="Set your Last.fm username")
