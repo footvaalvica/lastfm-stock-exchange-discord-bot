@@ -7,7 +7,7 @@ from services.database import (
     get_closest_snapshot, get_snapshot, get_latest_snapshot, get_db,
     get_total_scrobbles_for_artist, get_price_changes, get_most_held_artists,
     get_snapshots_bulk, get_latest_snapshots_bulk, get_closest_snapshot_bulk,
-    get_daily_scrobble_counts, _cap_daily_price
+    get_daily_scrobble_counts, _cap_daily_price, get_all_artists
 )
 from services.lastfm import fetch_recent_tracks, get_artist_listener_count
 
@@ -478,4 +478,41 @@ def get_market_overview(guild_id: int = 0, days: int = 1) -> dict:
         'losers': losers,
         'most_held': most_held,
         'days': days,
+    }
+
+
+def get_stock_rankings(limit: int = 10) -> dict:
+    artist_names = get_all_artists()
+    if not artist_names:
+        return {'most_valuable': [], 'least_valuable': []}
+
+    latest_prices = get_latest_snapshots_bulk(artist_names)
+    today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    yesterday_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    yesterday_prices = get_snapshots_bulk(artist_names, yesterday_str)
+
+    rankings = []
+    for artist_name in artist_names:
+        current_listeners = latest_prices.get(artist_name)
+        if current_listeners is None:
+            continue
+
+        base_listeners = yesterday_prices.get(artist_name)
+        if base_listeners is None:
+            base_listeners = current_listeners
+
+        capped_price = _cap_daily_price(base_listeners, current_listeners)
+        capped_price = max(capped_price, 1)
+        current_share_value = BASE_SHARE_VALUE * (capped_price / base_listeners) if base_listeners > 0 else BASE_SHARE_VALUE
+
+        rankings.append({
+            'artist_name': artist_name,
+            'current_share_value': current_share_value,
+            'listeners': capped_price,
+        })
+
+    rankings.sort(key=lambda x: x['current_share_value'], reverse=True)
+    return {
+        'most_valuable': rankings[:limit],
+        'least_valuable': rankings[-limit:][::-1],
     }

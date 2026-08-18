@@ -512,10 +512,21 @@ def get_daily_scrobble_counts(discord_id: int, days: int = 7) -> dict[str, int]:
         rows = conn.execute(
             '''SELECT scrobble_date, SUM(count) as total
                FROM scrobbles
-               WHERE discord_id = ? AND scrobble_date >= ? AND scrobble_date < ?
-               GROUP BY scrobble_date''',
+                WHERE discord_id = ? AND scrobble_date >= ? AND scrobble_date < ?
+                GROUP BY scrobble_date''',
             (discord_id, cutoff, today_str)
         ).fetchall()
         return {row['scrobble_date']: row['total'] for row in rows}
+    finally:
+        conn.close()
+
+
+def get_all_artists() -> list[str]:
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            'SELECT DISTINCT artist_name FROM artist_popularity ORDER BY artist_name COLLATE NOCASE'
+        ).fetchall()
+        return [row['artist_name'] for row in rows]
     finally:
         conn.close()

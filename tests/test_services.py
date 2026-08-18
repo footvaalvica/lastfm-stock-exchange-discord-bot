@@ -16,9 +16,9 @@ from services.database import (
     insert_scrobble, update_user_money_and_claim,
     get_closest_snapshot, get_snapshot, upsert_snapshot, update_last_preview,
     update_user_money, get_price_changes, get_most_held_artists, get_transactions,
-    get_daily_scrobble_counts, _cap_daily_price
+    get_daily_scrobble_counts, _cap_daily_price, get_all_artists
 )
-from services.portfolio import calculate_portfolio_value, get_portfolio_breakdown, get_artist_info, get_artist_price_history, get_market_overview, get_claim_multiplier, get_balance_stats, BASE_SHARE_VALUE
+from services.portfolio import calculate_portfolio_value, get_portfolio_breakdown, get_artist_info, get_artist_price_history, get_market_overview, get_claim_multiplier, get_balance_stats, BASE_SHARE_VALUE, get_stock_rankings
 from cogs.commands import format_listeners
 
 GUILD_ID = 1
@@ -289,6 +289,30 @@ async def test_get_market_overview(tmp_db):
     assert 'current_share_value' in overview['losers'][0]
     assert 'change_value' in overview['losers'][0]
     assert len(overview['most_held']) == 2
+
+
+def test_get_stock_rankings(tmp_db):
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    upsert_snapshot("Expensive Artist", 1000000, yesterday)
+    upsert_snapshot("Expensive Artist", 1500000, today)
+    upsert_snapshot("Cheap Artist", 100000, yesterday)
+    upsert_snapshot("Cheap Artist", 50000, today)
+    upsert_snapshot("Mid Artist", 500000, yesterday)
+    upsert_snapshot("Mid Artist", 500000, today)
+
+    rankings = get_stock_rankings(limit=10)
+    assert len(rankings['most_valuable']) == 3
+    assert len(rankings['least_valuable']) == 3
+    assert rankings['most_valuable'][0]['artist_name'] == 'Expensive Artist'
+    assert rankings['least_valuable'][0]['artist_name'] == 'Cheap Artist'
+    assert rankings['most_valuable'][0]['current_share_value'] > rankings['least_valuable'][0]['current_share_value']
+
+
+def test_get_stock_rankings_empty(tmp_db):
+    rankings = get_stock_rankings(limit=10)
+    assert rankings['most_valuable'] == []
+    assert rankings['least_valuable'] == []
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from services.database import get_user, insert_user, update_last_preview, update_user_money, set_guild_config, get_transactions, add_user_to_guild
-from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview, get_balance_stats, get_claim_multiplier, LastFMPrivacyError
+from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview, get_balance_stats, get_claim_multiplier, LastFMPrivacyError, get_stock_rankings
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
 logger = logging.getLogger('lastfm_bot')
@@ -890,6 +890,50 @@ class StockCommands(commands.Cog):
                 "Something went wrong while fetching the market overview. Try again later."
             )
 
+    @app_commands.command(name="stocks", description="View most and least valuable stocks")
+    async def slash_stocks(self, interaction: discord.Interaction):
+        allowed, remaining = check_lastfm_cooldown(interaction.user.id)
+        if not allowed:
+            await interaction.response.send_message(
+                f"Please wait {remaining}s before checking the market again.",
+                ephemeral=True
+            )
+            return
+        await interaction.response.defer()
+        try:
+            rankings = get_stock_rankings(limit=10)
+
+            sections = []
+
+            if rankings['most_valuable']:
+                lines = []
+                for entry in rankings['most_valuable']:
+                    lines.append(f"📈 **{entry['artist_name']}**: {entry['current_share_value']:.2f}€")
+                sections.append("**Most Valuable Stocks**\n" + "\n".join(lines))
+
+            if rankings['least_valuable']:
+                lines = []
+                for entry in rankings['least_valuable']:
+                    lines.append(f"📉 **{entry['artist_name']}**: {entry['current_share_value']:.2f}€")
+                sections.append("**Least Valuable Stocks**\n" + "\n".join(lines))
+
+            if not sections:
+                await interaction.followup.send("No stock data available yet.")
+                return
+
+            body = "\n\n".join(sections)
+            embed = discord.Embed(
+                title="Stock Rankings",
+                description=body,
+                color=discord.Color.blue()
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error("Failed to get stock rankings: %s", e)
+            await interaction.followup.send(
+                "Something went wrong while fetching the stock rankings. Try again later."
+            )
+
 
     @app_commands.command(name="help", description="Show all commands")
     async def slash_help(self, interaction: discord.Interaction):
@@ -907,6 +951,7 @@ class StockCommands(commands.Cog):
             "/history <name> - View an artist's price history\n"
             "/transactions [artist] - View your transaction history\n"
             "/market - View market overview\n"
+            "/stocks - View most and least valuable stocks\n"
             "/marketconfig - Configure daily market summary (admin)\n"
             "/rules - How to play\n"
         )

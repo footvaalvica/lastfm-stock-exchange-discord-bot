@@ -572,6 +572,50 @@ class TestSlashMarket:
             assert "Most Held" not in embed.description
 
 
+class TestSlashStocks:
+    def test_no_data_message(self, tmp_db):
+        cmd = StockCommands(MagicMock())
+        interaction = make_interaction()
+
+        with patch('cogs.commands.get_stock_rankings', return_value={'most_valuable': [], 'least_valuable': []}):
+            async def run():
+                app_cmd = StockCommands.__dict__['slash_stocks']
+                await app_cmd.callback(cmd, interaction)
+
+            import asyncio
+            asyncio.run(run())
+
+            interaction.followup.send.assert_called_once()
+            assert "No stock data" in interaction.followup.send.call_args[0][0]
+
+    def test_shows_most_and_least_valuable(self, tmp_db):
+        cmd = StockCommands(MagicMock())
+        interaction = make_interaction()
+
+        with patch('cogs.commands.get_stock_rankings', return_value={
+            'most_valuable': [
+                {'artist_name': 'Taylor Swift', 'current_share_value': 15.50},
+                {'artist_name': 'Drake', 'current_share_value': 12.00},
+            ],
+            'least_valuable': [
+                {'artist_name': 'Obscure Band', 'current_share_value': 5.25},
+                {'artist_name': 'Niche Artist', 'current_share_value': 8.00},
+            ]
+        }):
+            async def run():
+                app_cmd = StockCommands.__dict__['slash_stocks']
+                await app_cmd.callback(cmd, interaction)
+
+            import asyncio
+            asyncio.run(run())
+
+            embed = interaction.followup.send.call_args[1]["embed"]
+            assert "Most Valuable Stocks" in embed.description
+            assert "Least Valuable Stocks" in embed.description
+            assert "Taylor Swift" in embed.description
+            assert "Obscure Band" in embed.description
+
+
 class TestSlashLeaderboard:
     def test_empty_leaderboard(self, tmp_db):
         cmd = StockCommands(MagicMock())
