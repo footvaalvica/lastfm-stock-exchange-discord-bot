@@ -2,6 +2,18 @@ import sqlite3
 import datetime
 from config import DB_PATH
 
+MAX_DAILY_CHANGE = 0.5
+
+
+def _cap_daily_price(base_price: int, current_price: int) -> int:
+    if base_price <= 0:
+        return current_price
+    ratio = current_price / base_price
+    min_ratio = 1.0 - MAX_DAILY_CHANGE
+    max_ratio = 1.0 + MAX_DAILY_CHANGE
+    capped_ratio = max(min_ratio, min(ratio, max_ratio))
+    return int(base_price * capped_ratio)
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -418,11 +430,13 @@ def get_price_changes(days: int = 1) -> list[dict]:
         past_listeners = past_by_name.get(artist_name)
         if past_listeners is None:
             continue
-        change = today_listeners - past_listeners
+        capped_today = _cap_daily_price(past_listeners, today_listeners)
+        capped_today = max(capped_today, 1)
+        change = capped_today - past_listeners
         change_percent = (change / past_listeners * 100) if past_listeners > 0 else 0.0
         result.append({
             'artist_name': artist_name,
-            'today_listeners': today_listeners,
+            'today_listeners': capped_today,
             'past_listeners': past_listeners,
             'change': change,
             'change_percent': change_percent,
@@ -474,5 +488,23 @@ def get_all_guild_configs() -> list[dict]:
     try:
         rows = conn.execute('SELECT * FROM guild_config WHERE market_channel_id IS NOT NULL').fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_daily_scrobble_counts(discord_id: int, days: int = 7) -> dict[str, int]:
+    conn = get_db()
+    try:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        cutoff = (now_utc.date() - datetime.timedelta(days=days)).isoformat().replace('-', '')
+        today_str = now_utc.date().isoformat().replace('-', '')
+        rows = conn.execute(
+            '''SELECT scrobble_date, SUM(count) as total
+               FROM scrobbles
+               WHERE discord_id = ? AND scrobble_date >= ? AND scrobble_date < ?
+               GROUP BY scrobble_date''',
+            (discord_id, cutoff, today_str)
+        ).fetchall()
+        return {row['scrobble_date']: row['total'] for row in rows}
     finally:
         conn.close()

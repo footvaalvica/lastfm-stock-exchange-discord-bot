@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from services.database import get_user, insert_user, update_last_preview, update_user_money, set_guild_config, get_transactions, add_user_to_guild
-from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview, get_balance_stats
+from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview, get_balance_stats, get_claim_multiplier, LastFMPrivacyError
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
 logger = logging.getLogger('lastfm_bot')
@@ -355,8 +355,7 @@ class StockCommands(commands.Cog):
             hours = remaining // 3600
             minutes = (remaining % 3600) // 60
             await interaction.response.send_message(
-                f"{interaction.user.mention}, you can only claim once every 24 hours. Try again in {hours}h {minutes}m.",
-                ephemeral=True
+                f"{interaction.user.mention}, you can only claim once every 24 hours. Try again in {hours}h {minutes}m."
             )
             return
 
@@ -380,13 +379,24 @@ class StockCommands(commands.Cog):
             return
         try:
             total_money, gain_loss = await process_user_claim(user, interaction.user.id, guild_id)
+            multiplier = get_claim_multiplier(interaction.user.id)
             gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
-            await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
+            if multiplier > 1.0:
+                await interaction.followup.send(
+                    f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str} (×{multiplier} listening bonus)"
+                )
+            else:
+                await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
         except Exception as e:
             logger.error("Failed to process claim for user %s: %s", interaction.user.id, e)
-            await interaction.followup.send(
-                f"{interaction.user.mention}, something went wrong while processing your claim. Try again later."
-            )
+            if isinstance(e, LastFMPrivacyError):
+                await interaction.followup.send(
+                    f"{interaction.user.mention}, your Last.fm account has privacy settings enabled that prevent others from seeing your streaming history. Please enable public access to your recent tracks in your Last.fm privacy settings."
+                )
+            else:
+                await interaction.followup.send(
+                    f"{interaction.user.mention}, something went wrong while processing your claim. Try again later."
+                )
 
 
     @app_commands.command(name="check", description="Recalculate your portfolio value (1h cooldown, admin bypass)")
@@ -433,9 +443,14 @@ class StockCommands(commands.Cog):
             await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
         except Exception as e:
             logger.error("Failed to check portfolio for user %s: %s", interaction.user.id, e)
-            await interaction.followup.send(
-                f"{interaction.user.mention}, something went wrong while checking your portfolio. Try again later."
-            )
+            if isinstance(e, LastFMPrivacyError):
+                await interaction.followup.send(
+                    f"{interaction.user.mention}, your Last.fm account has privacy settings enabled that prevent others from seeing your streaming history. Please enable public access to your recent tracks in your Last.fm privacy settings."
+                )
+            else:
+                await interaction.followup.send(
+                    f"{interaction.user.mention}, something went wrong while checking your portfolio. Try again later."
+                )
 
 
     @app_commands.command(name="balance", description="View your balance")
@@ -801,7 +816,12 @@ class StockCommands(commands.Cog):
                 "• When more people listen to an artist, the price goes up — your shares gain value\n"
                 "• The more scrobbles you have for an artist, the more shares you own\n"
                 "• Claim daily to keep accumulating shares\n"
-                "• Price changes happen once per day, so patience pays off"
+                "• Price changes happen once per day, so patience pays off\n\n"
+                "**Listening bonus:**\n"
+                "• Your 7-day average daily scrobbles give you a claim multiplier\n"
+                "• 100+ avg/day → ×1.2 bonus\n"
+                "• 50+ avg/day → ×1.1 bonus\n"
+                "• Below 50 → ×1.0 (no bonus)"
             ),
             color=discord.Color.blue()
         )

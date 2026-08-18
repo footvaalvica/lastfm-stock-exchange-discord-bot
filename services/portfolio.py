@@ -1,16 +1,44 @@
 import datetime
 import time
 import asyncio
+import pylast
 from services.database import (
     get_user, get_scrobbles, update_user_money_and_claim,
     get_closest_snapshot, get_snapshot, get_latest_snapshot, get_db,
     get_total_scrobbles_for_artist, get_price_changes, get_most_held_artists,
-    get_snapshots_bulk, get_latest_snapshots_bulk, get_closest_snapshot_bulk
+    get_snapshots_bulk, get_latest_snapshots_bulk, get_closest_snapshot_bulk,
+    get_daily_scrobble_counts, _cap_daily_price
 )
 from services.lastfm import fetch_recent_tracks, get_artist_listener_count
 
 
+class LastFMPrivacyError(Exception):
+    pass
+
+
 BASE_SHARE_VALUE = 10.0
+
+DAILY_SCROBBLE_CAP = 200
+MULTIPLIER_TIERS = [
+    (100, 1.2),
+    (50, 1.1),
+]
+
+
+def get_claim_multiplier(discord_id: int) -> float:
+    daily_counts = get_daily_scrobble_counts(discord_id, days=7)
+    if not daily_counts:
+        return 1.0
+
+    capped_counts = [min(count, DAILY_SCROBBLE_CAP) for count in daily_counts.values()]
+    total_capped = sum(capped_counts)
+    days_with_scrobbles = len(capped_counts)
+    weekly_avg = (total_capped / days_with_scrobbles) if days_with_scrobbles > 0 else 0.0
+
+    for threshold, multiplier in MULTIPLIER_TIERS:
+        if weekly_avg >= threshold:
+            return multiplier
+    return 1.0
 
 _ARTIST_INFO_CACHE_TTL = 300
 _ARTIST_INFO_CACHE_MAX = 1000
@@ -61,15 +89,16 @@ async def _get_artist_info_cached(artist_name: str, today_str: str) -> dict | No
         yesterday_str = (today_date - datetime.timedelta(days=1)).isoformat().replace('-', '')
         yesterday_snapshot = get_snapshot(canonical_name, yesterday_str)
         base_price = yesterday_snapshot['listeners'] if yesterday_snapshot else current_price
+        capped_price = _cap_daily_price(base_price, current_price)
 
-        gain_loss_percent = ((current_price / base_price) - 1) * 100 if base_price > 0 else 0.0
+        gain_loss_percent = ((capped_price / base_price) - 1) * 100 if base_price > 0 else 0.0
 
         result = {
             'artist_name': canonical_name,
             'base_price': base_price,
-            'current_price': current_price,
+            'current_price': capped_price,
             'base_value': BASE_SHARE_VALUE,
-            'current_share_value': BASE_SHARE_VALUE * (current_price / base_price) if base_price > 0 else BASE_SHARE_VALUE,
+            'current_share_value': BASE_SHARE_VALUE * (capped_price / base_price) if base_price > 0 else BASE_SHARE_VALUE,
             'gain_loss_percent': gain_loss_percent,
             'total_shares': total_shares,
         }
@@ -89,6 +118,10 @@ def calculate_portfolio_value(discord_id: int, today_str: str) -> tuple[float, f
     today_prices = get_snapshots_bulk(artist_names, today_str)
     latest_prices = get_latest_snapshots_bulk(artist_names)
 
+    today_date = datetime.date.fromisoformat(today_str)
+    yesterday_str = (today_date - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    yesterday_prices = get_snapshots_bulk(artist_names, yesterday_str)
+
     total_value = 0.0
     total_gain_percent = 0.0
     total_shares = 0
@@ -96,6 +129,9 @@ def calculate_portfolio_value(discord_id: int, today_str: str) -> tuple[float, f
         artist_name = row['artist_name']
         count = row['count']
         current_price = today_prices.get(artist_name) or latest_prices.get(artist_name, 0)
+        yesterday_price = yesterday_prices.get(artist_name)
+        if yesterday_price is not None and yesterday_price > 0:
+            current_price = _cap_daily_price(yesterday_price, current_price)
         has_price_data = current_price > 0
         purchase_price = row['purchase_price']
         if not has_price_data or purchase_price <= 0:
@@ -146,6 +182,9 @@ def get_balance_stats(discord_id: int, today_str: str, yesterday_str: str) -> di
     total_shares_for_gain = 0
     for artist_name, data in artist_data.items():
         current_price = today_prices.get(artist_name) or latest_prices.get(artist_name, 0)
+        yesterday_price = yesterday_prices.get(artist_name)
+        if yesterday_price is not None and yesterday_price > 0:
+            current_price = _cap_daily_price(yesterday_price, current_price)
         has_price_data = current_price > 0
         avg_purchase = data['total_purchase'] / data['shares']
         shares = data['shares']
@@ -210,7 +249,16 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> tuple[floa
         time_from = last_claim
         use_today_price = False
 
-    daily_scrobbles = await fetch_recent_tracks(user, time_from=time_from, limit=100)
+    try:
+        daily_scrobbles = await fetch_recent_tracks(user, time_from=time_from, limit=100)
+    except (pylast.WSError, pylast.PyLastError) as e:
+        cause = getattr(e, '__cause__', None)
+        ws_error = cause if (cause is not None and hasattr(cause, 'code')) else (e if hasattr(e, 'code') else None)
+        if ws_error is not None:
+            error_code = getattr(ws_error, 'code', None)
+            if error_code not in (29, 16, 26):
+                raise LastFMPrivacyError(f"Last.fm user {user_row['lastfm_username']} has private recent tracks")
+        raise
 
     artist_plays: dict[str, int] = {}
     artist_dates: dict[str, str] = {}
@@ -297,6 +345,8 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> tuple[floa
         total_shares += play_count
 
     avg_gain_loss_percent = (total_gain_percent / total_shares) if total_shares > 0 else 0.0
+    multiplier = get_claim_multiplier(discord_id)
+    total_money *= multiplier
     update_user_money_and_claim(discord_id, total_money, unix_timestamp)
 
     return total_money, avg_gain_loss_percent
@@ -322,10 +372,16 @@ def get_portfolio_breakdown(discord_id: int, today_str: str) -> list[dict]:
     artist_names = list(artist_data.keys())
     today_prices = get_snapshots_bulk(artist_names, today_str)
     latest_prices = get_latest_snapshots_bulk(artist_names)
+    today_date = datetime.date.fromisoformat(today_str)
+    yesterday_str = (today_date - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    yesterday_prices = get_snapshots_bulk(artist_names, yesterday_str)
 
     breakdown = []
     for artist_name, data in artist_data.items():
         current_price = today_prices.get(artist_name) or latest_prices.get(artist_name, 0)
+        yesterday_price = yesterday_prices.get(artist_name)
+        if yesterday_price is not None and yesterday_price > 0:
+            current_price = _cap_daily_price(yesterday_price, current_price)
         has_price_data = current_price > 0
         canonical_name = artist_name
         avg_purchase = data['total_purchase'] / data['shares']

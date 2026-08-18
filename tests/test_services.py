@@ -15,9 +15,10 @@ from services.database import (
     get_db, init_db, get_user, insert_user, get_scrobbles,
     insert_scrobble, update_user_money_and_claim,
     get_closest_snapshot, get_snapshot, upsert_snapshot, update_last_preview,
-    update_user_money, get_price_changes, get_most_held_artists, get_transactions
+    update_user_money, get_price_changes, get_most_held_artists, get_transactions,
+    get_daily_scrobble_counts, _cap_daily_price
 )
-from services.portfolio import calculate_portfolio_value, get_portfolio_breakdown, get_artist_info, get_artist_price_history, get_market_overview
+from services.portfolio import calculate_portfolio_value, get_portfolio_breakdown, get_artist_info, get_artist_price_history, get_market_overview, get_claim_multiplier, get_balance_stats, BASE_SHARE_VALUE
 from cogs.commands import format_listeners
 
 GUILD_ID = 1
@@ -334,3 +335,242 @@ def test_get_transactions_filtered_by_artist(tmp_db):
     txs = get_transactions(123456789, artist_name="Taylor Swift")
     assert len(txs) == 1
     assert txs[0]['artist_name'] == "Taylor Swift"
+
+
+def test_get_daily_scrobble_counts(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    dates = [(today - datetime.timedelta(days=i)).isoformat().replace('-', '') for i in range(1, 4)]
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, dates[0], count=10)
+    insert_scrobble(123456789, GUILD_ID, "Drake", 12000000, dates[0], count=5)
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15100000, dates[1], count=3)
+
+    counts = get_daily_scrobble_counts(123456789, days=7)
+    assert counts.get(dates[0]) == 15
+    assert counts.get(dates[1]) == 3
+
+
+def test_get_claim_multiplier_no_scrobbles(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    assert get_claim_multiplier(123456789) == 1.0
+
+
+def test_get_claim_multiplier_below_thresholds(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, "20260720", count=10)
+    assert get_claim_multiplier(123456789) == 1.0
+
+
+def test_get_claim_multiplier_1_1x_tier(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    for day in range(7):
+        date_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=day)).isoformat().replace('-', '')
+        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, date_str, count=60)
+    assert get_claim_multiplier(123456789) == pytest.approx(1.1)
+
+
+def test_get_claim_multiplier_1_2x_tier(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    for day in range(7):
+        date_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=day)).isoformat().replace('-', '')
+        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, date_str, count=120)
+    assert get_claim_multiplier(123456789) == pytest.approx(1.2)
+
+
+def test_get_claim_multiplier_caps_daily_count(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    for day in range(7):
+        date_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=day)).isoformat().replace('-', '')
+        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, date_str, count=300)
+    assert get_claim_multiplier(123456789) == pytest.approx(1.2)
+
+
+def test_get_daily_scrobble_counts_excludes_today(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    today_str = today.isoformat().replace('-', '')
+    yesterday_str = (today - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, today_str, count=100)
+    insert_scrobble(123456789, GUILD_ID, "Drake", 12000000, yesterday_str, count=50)
+
+    counts = get_daily_scrobble_counts(123456789, days=7)
+    assert today_str not in counts
+    assert counts.get(yesterday_str) == 50
+
+
+def test_get_claim_multiplier_ignores_today_scrobbles(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    today_str = today.isoformat().replace('-', '')
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, today_str, count=200)
+    assert get_claim_multiplier(123456789) == 1.0
+
+
+def test_get_claim_multiplier_first_time_user_no_bonus(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    today_str = today.isoformat().replace('-', '')
+    for _ in range(5):
+        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, today_str, count=10)
+    assert get_claim_multiplier(123456789) == 1.0
+
+
+def test_cap_daily_price_positive_gain():
+    assert _cap_daily_price(1000, 5000) == 1500
+
+
+def test_cap_daily_price_negative_gain():
+    assert _cap_daily_price(1000, 300) == 500
+
+
+def test_cap_daily_price_within_cap():
+    assert _cap_daily_price(1000, 1200) == 1200
+
+
+def test_cap_daily_price_zero_base():
+    assert _cap_daily_price(0, 100) == 100
+
+
+def test_cap_daily_price_no_change():
+    assert _cap_daily_price(1000, 1000) == 1000
+
+
+def test_cap_daily_price_large_loss():
+    assert _cap_daily_price(10000, 1000) == 5000
+
+
+def test_get_price_changes_respects_daily_cap(tmp_db):
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    upsert_snapshot("Taylor Swift", 1000, yesterday)
+    upsert_snapshot("Taylor Swift", 5000, today)
+
+    changes = get_price_changes(days=1)
+    taylor = next(c for c in changes if c['artist_name'] == 'Taylor Swift')
+    assert taylor['change_percent'] == pytest.approx(50.0, abs=1e-3)
+    assert taylor['today_listeners'] == 1500
+
+
+def test_get_price_changes_respects_daily_cap_loss(tmp_db):
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    upsert_snapshot("Drake", 1000, yesterday)
+    upsert_snapshot("Drake", 300, today)
+
+    changes = get_price_changes(days=1)
+    drake = next(c for c in changes if c['artist_name'] == 'Drake')
+    assert drake['change_percent'] == pytest.approx(-50.0, abs=1e-3)
+    assert drake['today_listeners'] == 500
+
+
+@pytest.mark.asyncio
+async def test_calculate_portfolio_value_respects_daily_cap(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 1000, "20260722")
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    upsert_snapshot("Taylor Swift", 1000, yesterday)
+    upsert_snapshot("Taylor Swift", 5000, today)
+
+    value, gain = calculate_portfolio_value(123456789, today)
+    expected_value = BASE_SHARE_VALUE * (1500 / 1000)
+    assert value == pytest.approx(expected_value, abs=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_get_balance_stats_respects_daily_cap(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 1000, "20260722")
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    upsert_snapshot("Taylor Swift", 1000, yesterday)
+    upsert_snapshot("Taylor Swift", 5000, today)
+
+    stats = get_balance_stats(123456789, today, yesterday)
+    assert stats['today_change'] == pytest.approx(50.0, abs=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_get_artist_info_respects_daily_cap(tmp_db):
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    upsert_snapshot("Taylor Swift", 1000, yesterday)
+    upsert_snapshot("Taylor Swift", 5000, today)
+
+    info = await get_artist_info("Taylor Swift", today)
+    assert info is not None
+    assert info['current_price'] == 1500
+    assert info['gain_loss_percent'] == pytest.approx(50.0, abs=1e-3)
+
+
+def test_cap_daily_price_boosts_are_capped(tmp_db):
+    base = 500000
+    boosted = 800000
+    capped = _cap_daily_price(base, boosted)
+    assert capped == 750000
+
+
+def test_cap_daily_price_normalization_within_cap(tmp_db):
+    yesterday = 750000
+    today = 500000
+    capped = _cap_daily_price(yesterday, today)
+    assert capped == 500000
+
+
+def test_cap_daily_price_normalization_multiple_days(tmp_db):
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    base_day = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=5)).isoformat().replace('-', '')
+    spike_day = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=4)).isoformat().replace('-', '')
+    drop_day1 = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=3)).isoformat().replace('-', '')
+    drop_day2 = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=2)).isoformat().replace('-', '')
+    drop_day3 = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+
+    upsert_snapshot("The Hype Band", 500000, base_day)
+    upsert_snapshot("The Hype Band", 750000, spike_day)
+    upsert_snapshot("The Hype Band", 650000, drop_day1)
+    upsert_snapshot("The Hype Band", 550000, drop_day2)
+    upsert_snapshot("The Hype Band", 500000, drop_day3)
+    upsert_snapshot("The Hype Band", 500000, today)
+
+    changes = get_price_changes(days=1)
+    band = next(c for c in changes if c['artist_name'] == "The Hype Band")
+    assert band['change_percent'] == pytest.approx(0.0, abs=1e-3)
+    assert band['today_listeners'] == 500000
+
+
+@pytest.mark.asyncio
+async def test_get_artist_info_boost_then_normalize(tmp_db):
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    upsert_snapshot("The Hype Band", 500000, yesterday)
+    upsert_snapshot("The Hype Band", 500000, today)
+
+    info = await get_artist_info("The Hype Band", today)
+    assert info['current_price'] == 500000
+    assert info['gain_loss_percent'] == pytest.approx(0.0, abs=1e-3)
+
+
+def test_get_price_changes_large_boost_normalizes_over_days(tmp_db):
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    upsert_snapshot("The Hype Band", 500000, yesterday)
+    upsert_snapshot("The Hype Band", 1000000, today)
+
+    changes = get_price_changes(days=1)
+    band = next(c for c in changes if c['artist_name'] == "The Hype Band")
+    assert band['change_percent'] == pytest.approx(50.0, abs=1e-3)
+    assert band['today_listeners'] == 750000
+
+
+@pytest.mark.asyncio
+async def test_calculate_portfolio_value_after_boost_and_drop(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    insert_scrobble(123456789, GUILD_ID, "The Hype Band", 500000, "20260720", count=10)
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    upsert_snapshot("The Hype Band", 500000, yesterday)
+    upsert_snapshot("The Hype Band", 500000, today)
+
+    value, gain = calculate_portfolio_value(123456789, today)
+    assert value == pytest.approx(BASE_SHARE_VALUE * 10, abs=1e-3)
+    assert gain == pytest.approx(0.0, abs=1e-3)

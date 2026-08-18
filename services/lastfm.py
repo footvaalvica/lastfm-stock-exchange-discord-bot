@@ -33,6 +33,27 @@ async def _fetch_with_retry(fn, *args, **kwargs):
             else:
                 logger.error(f"Last.fm API error {error_code}: {e}")
                 raise
+        except pylast.PyLastError as e:
+            cause = getattr(e, '__cause__', None)
+            if cause is not None and hasattr(cause, 'code'):
+                last_exception = cause
+                error_code = cause.code
+                if error_code == 29:
+                    delay = min(BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 0.5), MAX_DELAY)
+                    logger.warning(f"Last.fm rate limited (attempt {attempt}/{MAX_RETRIES}), backing off {delay:.1f}s")
+                    await asyncio.sleep(delay)
+                elif error_code in (16, 26):
+                    logger.error(f"Last.fm permanent error {error_code}: {e}")
+                    raise last_exception
+                else:
+                    logger.error(f"Last.fm API error {error_code}: {e}")
+                    raise last_exception
+            else:
+                last_exception = e
+                logger.error(f"Unexpected Last.fm error on attempt {attempt}: {type(e).__name__}: {e}")
+                if attempt < MAX_RETRIES:
+                    delay = min(BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 0.5), MAX_DELAY)
+                    await asyncio.sleep(delay)
         except asyncio.TimeoutError:
             last_exception = TimeoutError(f"Last.fm request timed out after {FETCH_TIMEOUT}s on attempt {attempt}")
             logger.error(str(last_exception))
