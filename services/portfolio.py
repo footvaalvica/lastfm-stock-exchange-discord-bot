@@ -7,7 +7,7 @@ from services.database import (
     get_closest_snapshot, get_snapshot, get_latest_snapshot, get_db,
     get_total_scrobbles_for_artist, get_price_changes, get_most_held_artists,
     get_snapshots_bulk, get_latest_snapshots_bulk, get_closest_snapshot_bulk,
-    get_daily_scrobble_counts, _cap_daily_price, get_all_artists
+    get_daily_scrobble_counts, _cap_daily_price, get_all_artists, upsert_snapshot
 )
 from services.lastfm import fetch_recent_tracks, get_artist_listener_count
 
