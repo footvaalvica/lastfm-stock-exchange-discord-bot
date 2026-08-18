@@ -363,7 +363,7 @@ def test_get_claim_multiplier_below_thresholds(tmp_db):
 
 def test_get_claim_multiplier_1_1x_tier(tmp_db):
     insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
-    for day in range(7):
+    for day in range(1, 8):
         date_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=day)).isoformat().replace('-', '')
         insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, date_str, count=60)
     assert get_claim_multiplier(123456789) == pytest.approx(1.1)
@@ -371,7 +371,7 @@ def test_get_claim_multiplier_1_1x_tier(tmp_db):
 
 def test_get_claim_multiplier_1_2x_tier(tmp_db):
     insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
-    for day in range(7):
+    for day in range(1, 8):
         date_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=day)).isoformat().replace('-', '')
         insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, date_str, count=120)
     assert get_claim_multiplier(123456789) == pytest.approx(1.2)
@@ -379,10 +379,51 @@ def test_get_claim_multiplier_1_2x_tier(tmp_db):
 
 def test_get_claim_multiplier_caps_daily_count(tmp_db):
     insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
-    for day in range(7):
+    for day in range(1, 8):
         date_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=day)).isoformat().replace('-', '')
         insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, date_str, count=300)
     assert get_claim_multiplier(123456789) == pytest.approx(1.2)
+
+
+def test_get_claim_multiplier_streak_broken_by_missing_day(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    for day in range(1, 8):
+        date_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=day)).isoformat().replace('-', '')
+        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, date_str, count=60)
+    # Remove day 4 to break streak
+    missing_date = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=4)).isoformat().replace('-', '')
+    conn = get_db()
+    try:
+        conn.execute('DELETE FROM scrobbles WHERE discord_id = ? AND scrobble_date = ?', (123456789, missing_date))
+        conn.commit()
+    finally:
+        conn.close()
+    assert get_claim_multiplier(123456789) == 1.0
+
+
+def test_get_claim_multiplier_exactly_50_per_day(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    for day in range(1, 8):
+        date_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=day)).isoformat().replace('-', '')
+        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, date_str, count=50)
+    assert get_claim_multiplier(123456789) == pytest.approx(1.1)
+
+
+def test_get_claim_multiplier_exactly_100_per_day(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    for day in range(1, 8):
+        date_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=day)).isoformat().replace('-', '')
+        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, date_str, count=100)
+    assert get_claim_multiplier(123456789) == pytest.approx(1.2)
+
+
+def test_get_claim_multiplier_one_day_below_50_breaks_streak(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    for day in range(1, 8):
+        date_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=day)).isoformat().replace('-', '')
+        count = 60 if day != 3 else 49
+        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, date_str, count=count)
+    assert get_claim_multiplier(123456789) == 1.0
 
 
 def test_get_daily_scrobble_counts_excludes_today(tmp_db):
@@ -412,6 +453,16 @@ def test_get_claim_multiplier_first_time_user_no_bonus(tmp_db):
     today_str = today.isoformat().replace('-', '')
     for _ in range(5):
         insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, today_str, count=10)
+    assert get_claim_multiplier(123456789) == 1.0
+
+
+def test_get_claim_multiplier_two_days_heavy_no_bonus(tmp_db):
+    insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    yesterday = today - datetime.timedelta(days=1)
+    yesterday_str = yesterday.isoformat().replace('-', '')
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, yesterday_str, count=200)
+    insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, yesterday_str, count=200)
     assert get_claim_multiplier(123456789) == 1.0
 
 

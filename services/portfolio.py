@@ -26,18 +26,31 @@ MULTIPLIER_TIERS = [
 
 
 def get_claim_multiplier(discord_id: int) -> float:
-    daily_counts = get_daily_scrobble_counts(discord_id, days=7)
+    daily_counts = get_daily_scrobble_counts(discord_id, days=30)
     if not daily_counts:
         return 1.0
 
-    capped_counts = [min(count, DAILY_SCROBBLE_CAP) for count in daily_counts.values()]
-    total_capped = sum(capped_counts)
-    days_with_scrobbles = len(capped_counts)
-    weekly_avg = (total_capped / days_with_scrobbles) if days_with_scrobbles > 0 else 0.0
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    streak_ok = True
+    min_daily = None
 
-    for threshold, multiplier in MULTIPLIER_TIERS:
-        if weekly_avg >= threshold:
-            return multiplier
+    for i in range(1, 8):
+        date = today - datetime.timedelta(days=i)
+        date_str = date.isoformat().replace('-', '')
+        count = daily_counts.get(date_str, 0)
+        if count <= 0:
+            streak_ok = False
+            break
+        if min_daily is None or count < min_daily:
+            min_daily = count
+
+    if not streak_ok or min_daily is None:
+        return 1.0
+
+    if min_daily >= 100:
+        return 1.2
+    if min_daily >= 50:
+        return 1.1
     return 1.0
 
 _ARTIST_INFO_CACHE_TTL = 300
