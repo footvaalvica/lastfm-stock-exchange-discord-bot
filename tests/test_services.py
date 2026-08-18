@@ -245,11 +245,11 @@ def test_get_price_changes(tmp_db):
     changes = get_price_changes(days=1)
     assert len(changes) == 2
     taylor = next(c for c in changes if c['artist_name'] == 'Taylor Swift')
-    assert taylor['change'] == 200000
-    assert taylor['change_percent'] == pytest.approx(1.3333, abs=1e-3)
+    assert taylor['change'] == 600000
+    assert taylor['change_percent'] == pytest.approx(4.0, abs=1e-3)
     drake = next(c for c in changes if c['artist_name'] == 'Drake')
-    assert drake['change'] == -100000
-    assert drake['change_percent'] == pytest.approx(-0.8333, abs=1e-3)
+    assert drake['change'] == -300000
+    assert drake['change_percent'] == pytest.approx(-2.5, abs=1e-3)
 
 
 def test_get_most_held_artists(tmp_db):
@@ -282,8 +282,12 @@ async def test_get_market_overview(tmp_db):
     overview = get_market_overview()
     assert len(overview['gainers']) == 1
     assert overview['gainers'][0]['artist_name'] == 'Taylor Swift'
+    assert 'current_share_value' in overview['gainers'][0]
+    assert 'change_value' in overview['gainers'][0]
     assert len(overview['losers']) == 1
     assert overview['losers'][0]['artist_name'] == 'Drake'
+    assert 'current_share_value' in overview['losers'][0]
+    assert 'change_value' in overview['losers'][0]
     assert len(overview['most_held']) == 2
 
 
@@ -298,9 +302,9 @@ async def test_get_artist_info_uses_yesterday_as_base(tmp_db):
 
     info = await get_artist_info("Phoebe Bridgers", today)
     assert info is not None
-    assert info['current_price'] == 2253102
+    assert info['current_price'] == 2256305
     assert info['base_price'] == 2251500
-    assert info['gain_loss_percent'] == pytest.approx(0.0709, abs=1e-3)
+    assert info['gain_loss_percent'] == pytest.approx(0.2125, abs=1e-3)
 
 
 @pytest.mark.asyncio
@@ -475,7 +479,7 @@ def test_cap_daily_price_negative_gain():
 
 
 def test_cap_daily_price_within_cap():
-    assert _cap_daily_price(1000, 1200) == 1200
+    assert _cap_daily_price(1000, 1200) == 1500
 
 
 def test_cap_daily_price_zero_base():
@@ -488,6 +492,14 @@ def test_cap_daily_price_no_change():
 
 def test_cap_daily_price_large_loss():
     assert _cap_daily_price(10000, 1000) == 5000
+
+
+def test_cap_daily_price_volatility_amplifies_small_gain():
+    assert _cap_daily_price(1000, 1020) == 1060
+
+
+def test_cap_daily_price_volatility_amplifies_small_loss():
+    assert _cap_daily_price(1000, 980) == 940
 
 
 def test_get_price_changes_respects_daily_cap(tmp_db):
@@ -565,7 +577,7 @@ def test_cap_daily_price_normalization_within_cap(tmp_db):
     yesterday = 750000
     today = 500000
     capped = _cap_daily_price(yesterday, today)
-    assert capped == 500000
+    assert capped == 375000
 
 
 def test_cap_daily_price_normalization_multiple_days(tmp_db):

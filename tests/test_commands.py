@@ -426,7 +426,7 @@ class TestSlashMarket:
 
         async def run():
             app_cmd = StockCommands.__dict__['slash_market']
-            await app_cmd.callback(cmd, interaction)
+            await app_cmd.callback(cmd, interaction, "day")
 
         import asyncio
         asyncio.run(run())
@@ -442,13 +442,134 @@ class TestSlashMarket:
 
         async def run():
             app_cmd = StockCommands.__dict__['slash_market']
-            await app_cmd.callback(cmd, interaction)
+            await app_cmd.callback(cmd, interaction, "day")
 
         import asyncio
         asyncio.run(run())
 
         interaction.response.send_message.assert_called_once()
         assert "wait" in interaction.response.send_message.call_args[0][0].lower()
+
+    def test_week_period_title(self, tmp_db):
+        cmd = StockCommands(MagicMock())
+        interaction = make_interaction()
+
+        with patch('cogs.commands.get_market_overview', return_value={
+            'gainers': [{'artist_name': 'Taylor Swift', 'current_share_value': 10.20, 'change_value': 0.20, 'change_percent': 2.0}],
+            'losers': [],
+            'most_held': [],
+            'days': 7
+        }):
+            async def run():
+                app_cmd = StockCommands.__dict__['slash_market']
+                await app_cmd.callback(cmd, interaction, "week")
+
+            import asyncio
+            asyncio.run(run())
+
+            embed = interaction.followup.send.call_args[1]["embed"]
+            assert "Weekly Market Overview" in embed.title
+
+    def test_month_period_title(self, tmp_db):
+        cmd = StockCommands(MagicMock())
+        interaction = make_interaction()
+
+        with patch('cogs.commands.get_market_overview', return_value={
+            'gainers': [{'artist_name': 'Taylor Swift', 'current_share_value': 10.20, 'change_value': 0.20, 'change_percent': 2.0}],
+            'losers': [],
+            'most_held': [],
+            'days': 30
+        }):
+            async def run():
+                app_cmd = StockCommands.__dict__['slash_market']
+                await app_cmd.callback(cmd, interaction, "month")
+
+            import asyncio
+            asyncio.run(run())
+
+            embed = interaction.followup.send.call_args[1]["embed"]
+            assert "Monthly Market Overview" in embed.title
+
+    def test_year_period_title(self, tmp_db):
+        cmd = StockCommands(MagicMock())
+        interaction = make_interaction()
+
+        with patch('cogs.commands.get_market_overview', return_value={
+            'gainers': [{'artist_name': 'Taylor Swift', 'current_share_value': 10.20, 'change_value': 0.20, 'change_percent': 2.0}],
+            'losers': [],
+            'most_held': [],
+            'days': 365
+        }):
+            async def run():
+                app_cmd = StockCommands.__dict__['slash_market']
+                await app_cmd.callback(cmd, interaction, "year")
+
+            import asyncio
+            asyncio.run(run())
+
+            embed = interaction.followup.send.call_args[1]["embed"]
+            assert "Yearly Market Overview" in embed.title
+
+    def test_day_period_includes_most_held(self, tmp_db):
+        cmd = StockCommands(MagicMock())
+        interaction = make_interaction()
+
+        with patch('cogs.commands.get_market_overview', return_value={
+            'gainers': [{'artist_name': 'Taylor Swift', 'current_share_value': 10.20, 'change_value': 0.20, 'change_percent': 2.0}],
+            'losers': [],
+            'most_held': [{'artist_name': 'Taylor Swift', 'count': 10}],
+            'days': 1
+        }):
+            async def run():
+                app_cmd = StockCommands.__dict__['slash_market']
+                await app_cmd.callback(cmd, interaction, "day")
+
+            import asyncio
+            asyncio.run(run())
+
+            embed = interaction.followup.send.call_args[1]["embed"]
+            assert "Most Held" in embed.description
+            assert "Taylor Swift" in embed.description
+
+    def test_week_period_excludes_most_held(self, tmp_db):
+        cmd = StockCommands(MagicMock())
+        interaction = make_interaction()
+
+        with patch('cogs.commands.get_market_overview', return_value={
+            'gainers': [{'artist_name': 'Taylor Swift', 'current_share_value': 10.20, 'change_value': 0.20, 'change_percent': 2.0}],
+            'losers': [],
+            'most_held': [{'artist_name': 'Taylor Swift', 'count': 10}],
+            'days': 7
+        }):
+            async def run():
+                app_cmd = StockCommands.__dict__['slash_market']
+                await app_cmd.callback(cmd, interaction, "week")
+
+            import asyncio
+            asyncio.run(run())
+
+            embed = interaction.followup.send.call_args[1]["embed"]
+            assert "Most Held" not in embed.description
+
+    def test_alltime_period_excludes_most_held(self, tmp_db):
+        cmd = StockCommands(MagicMock())
+        interaction = make_interaction()
+
+        with patch('cogs.commands.get_market_overview', return_value={
+            'gainers': [{'artist_name': 'Taylor Swift', 'current_share_value': 10.20, 'change_value': 0.20, 'change_percent': 2.0}],
+            'losers': [],
+            'most_held': [{'artist_name': 'Taylor Swift', 'count': 10}],
+            'days': 'alltime'
+        }):
+            async def run():
+                app_cmd = StockCommands.__dict__['slash_market']
+                await app_cmd.callback(cmd, interaction, "alltime")
+
+            import asyncio
+            asyncio.run(run())
+
+            embed = interaction.followup.send.call_args[1]["embed"]
+            assert "Most Held" not in embed.description
 
 
 class TestSlashLeaderboard:

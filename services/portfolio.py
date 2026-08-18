@@ -459,8 +459,17 @@ async def get_artist_info(artist_name: str, today_str: str) -> dict | None:
     return await _get_artist_info_cached(artist_name, today_str)
 
 
-def get_market_overview(guild_id: int = 0) -> dict:
-    changes = get_price_changes(days=1)
+def get_market_overview(guild_id: int = 0, days: int = 1) -> dict:
+    changes = get_price_changes(days=days)
+    for entry in changes:
+        past_listeners = entry.get('past_listeners', 0)
+        capped_today = entry.get('today_listeners', 0)
+        if past_listeners > 0:
+            entry['current_share_value'] = BASE_SHARE_VALUE * (capped_today / past_listeners)
+            entry['change_value'] = entry['current_share_value'] - BASE_SHARE_VALUE
+        else:
+            entry['current_share_value'] = BASE_SHARE_VALUE
+            entry['change_value'] = 0.0
     gainers = sorted([c for c in changes if c['change_percent'] > 0], key=lambda x: x['change_percent'], reverse=True)[:5]
     losers = sorted([c for c in changes if c['change_percent'] < 0], key=lambda x: x['change_percent'])[:5]
     most_held = get_most_held_artists(limit=5, guild_id=guild_id)
@@ -468,4 +477,5 @@ def get_market_overview(guild_id: int = 0) -> dict:
         'gainers': gainers,
         'losers': losers,
         'most_held': most_held,
+        'days': days,
     }

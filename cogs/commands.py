@@ -829,7 +829,14 @@ class StockCommands(commands.Cog):
 
 
     @app_commands.command(name="market", description="View market overview: top gainers, losers, and most held artists")
-    async def slash_market(self, interaction: discord.Interaction):
+    @app_commands.choices(period=[
+        app_commands.Choice(name="Day", value="day"),
+        app_commands.Choice(name="Week", value="week"),
+        app_commands.Choice(name="Month", value="month"),
+        app_commands.Choice(name="Year", value="year"),
+        app_commands.Choice(name="Alltime", value="alltime"),
+    ])
+    async def slash_market(self, interaction: discord.Interaction, period: str = "day"):
         allowed, remaining = check_lastfm_cooldown(interaction.user.id)
         if not allowed:
             await interaction.response.send_message(
@@ -840,23 +847,27 @@ class StockCommands(commands.Cog):
         await interaction.response.defer()
         try:
             guild_id = interaction.guild.id if interaction.guild else 0
-            overview = get_market_overview(guild_id)
+            days_map = {"day": 1, "week": 7, "month": 30, "year": 365, "alltime": "alltime"}
+            days = days_map.get(period, 1)
+            overview = get_market_overview(guild_id, days=days)
+
+            period_label = {"day": "Daily", "week": "Weekly", "month": "Monthly", "year": "Yearly", "alltime": "All-time"}.get(period, "Market")
 
             sections = []
 
             if overview['gainers']:
                 lines = []
                 for entry in overview['gainers']:
-                    lines.append(f"📈 **{entry['artist_name']}**: {format_listeners(entry['today_listeners'])} (+{entry['change_percent']:.2f}%)")
+                    lines.append(f"📈 **{entry['artist_name']}**: {entry['current_share_value']:.2f}€ ({entry['change_value']:+.2f}€ / {entry['change_percent']:+.2f}%)")
                 sections.append("**Top Gainers**\n" + "\n".join(lines))
 
             if overview['losers']:
                 lines = []
                 for entry in overview['losers']:
-                    lines.append(f"📉 **{entry['artist_name']}**: {format_listeners(entry['today_listeners'])} ({entry['change_percent']:.2f}%)")
+                    lines.append(f"📉 **{entry['artist_name']}**: {entry['current_share_value']:.2f}€ ({entry['change_value']:+.2f}€ / {entry['change_percent']:+.2f}%)")
                 sections.append("**Top Losers**\n" + "\n".join(lines))
 
-            if overview['most_held']:
+            if period == "day" and overview['most_held']:
                 lines = []
                 for entry in overview['most_held']:
                     lines.append(f"🏦 **{entry['artist_name']}**: {entry['count']} shares")
@@ -868,7 +879,7 @@ class StockCommands(commands.Cog):
 
             body = "\n\n".join(sections)
             embed = discord.Embed(
-                title="Market Overview",
+                title=f"{period_label} Market Overview",
                 description=body,
                 color=discord.Color.blue()
             )

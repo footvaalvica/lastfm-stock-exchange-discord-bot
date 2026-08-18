@@ -3,15 +3,17 @@ import datetime
 from config import DB_PATH
 
 MAX_DAILY_CHANGE = 0.5
+VOLATILITY_MULTIPLIER = 3
 
 
-def _cap_daily_price(base_price: int, current_price: int) -> int:
+def _cap_daily_price(base_price: int, current_price: int, volatility_multiplier: float = VOLATILITY_MULTIPLIER) -> int:
     if base_price <= 0:
         return current_price
-    ratio = current_price / base_price
-    min_ratio = 1.0 - MAX_DAILY_CHANGE
-    max_ratio = 1.0 + MAX_DAILY_CHANGE
-    capped_ratio = max(min_ratio, min(ratio, max_ratio))
+    raw_ratio = current_price / base_price
+    centered = raw_ratio - 1.0
+    scaled = centered * volatility_multiplier
+    capped_scaled = max(-MAX_DAILY_CHANGE, min(scaled, MAX_DAILY_CHANGE))
+    capped_ratio = 1.0 + capped_scaled
     return int(base_price * capped_ratio)
 
 
@@ -403,22 +405,31 @@ def get_total_scrobbles_for_artist(artist_name: str) -> int:
         conn.close()
 
 
-def get_price_changes(days: int = 1) -> list[dict]:
+def get_price_changes(days: int | str = 1) -> list[dict]:
     conn = get_db()
     try:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         today = now_utc.date().isoformat().replace('-', '')
-        past = (now_utc.date() - datetime.timedelta(days=days)).isoformat().replace('-', '')
 
         today_rows = conn.execute(
             'SELECT artist_name, listeners FROM artist_popularity WHERE timestamp = ?',
             (today,)
         ).fetchall()
 
-        past_rows = conn.execute(
-            'SELECT artist_name, listeners FROM artist_popularity WHERE timestamp = ?',
-            (past,)
-        ).fetchall()
+        if days == "alltime":
+            past_rows = conn.execute(
+                '''SELECT artist_name, listeners FROM artist_popularity
+                   WHERE timestamp = (
+                       SELECT MIN(timestamp) FROM artist_popularity ap2
+                       WHERE ap2.artist_name = artist_popularity.artist_name COLLATE NOCASE
+                   )'''
+            ).fetchall()
+        else:
+            past = (now_utc.date() - datetime.timedelta(days=days)).isoformat().replace('-', '')
+            past_rows = conn.execute(
+                'SELECT artist_name, listeners FROM artist_popularity WHERE timestamp = ?',
+                (past,)
+            ).fetchall()
     finally:
         conn.close()
 
