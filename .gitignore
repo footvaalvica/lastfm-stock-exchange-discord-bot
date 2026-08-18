@@ -14,8 +14,17 @@ db.sqlite3
 db.sqlite3-wal
 db.sqlite3-shm
 
+# Backups
+backups/
+
+# Kilo
+.kilo/
+
 # Environment
 .env
+
+# Logs
+*.log
 
 # Tests
 .pytest_cache

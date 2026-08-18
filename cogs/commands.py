@@ -2,19 +2,23 @@ import logging
 import datetime
 import os
 import tempfile
+import time
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import discord
 from discord import app_commands
 from discord.ext import commands
-from services.database import get_user, insert_user, update_last_preview, update_user_money, set_guild_config, get_transactions, add_user_to_guild, get_scrobbles
+from services.database import get_user, insert_user, update_last_preview, update_user_money, set_guild_config, get_transactions, add_user_to_guild
 from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview, get_balance_stats
 from services.lastfm import validate_lastfm_user, get_lastfm_user
 
 logger = logging.getLogger('lastfm_bot')
 
 PAGE_SIZE = 5
+TXN_PAGE_SIZE = 10
+LASTFM_COOLDOWN_SECONDS = 2
+_lastfm_cooldowns: dict[int, float] = {}
 
 
 def get_user_in_guild(discord_id: int, guild_id: int):
@@ -22,6 +26,21 @@ def get_user_in_guild(discord_id: int, guild_id: int):
     if user_row:
         add_user_to_guild(discord_id, guild_id)
     return user_row
+
+
+def check_lastfm_cooldown(user_id: int) -> tuple[bool, int]:
+    now = time.time()
+    last = _lastfm_cooldowns.get(user_id, 0)
+    remaining = LASTFM_COOLDOWN_SECONDS - (now - last)
+    if remaining > 0:
+        return False, int(remaining)
+    _lastfm_cooldowns[user_id] = now
+    if len(_lastfm_cooldowns) > 5000:
+        cutoff = now - 600
+        stale = [uid for uid, ts in _lastfm_cooldowns.items() if ts <= cutoff]
+        for uid in stale:
+            del _lastfm_cooldowns[uid]
+    return True, 0
 
 
 def format_listeners(count: int) -> str:
@@ -86,7 +105,7 @@ class TransactionsView(discord.ui.View):
         self.previous_page.disabled = self.page == 0
         self.next_page.disabled = self.page >= self.total_pages - 1
 
-    def _build_embed(self) -> discord.Embed:
+    def build_embed(self) -> discord.Embed:
         start = self.page * self.page_size
         end = start + self.page_size
         page_artists = self.artists[start:end]
@@ -142,7 +161,7 @@ class TransactionsView(discord.ui.View):
         if self.page > 0:
             self.page -= 1
             self._update_buttons()
-            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
         else:
             await interaction.response.defer()
 
@@ -151,7 +170,7 @@ class TransactionsView(discord.ui.View):
         if self.page < self.total_pages - 1:
             self.page += 1
             self._update_buttons()
-            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
         else:
             await interaction.response.defer()
 
@@ -177,7 +196,7 @@ class PortfolioView(discord.ui.View):
         self.previous_page.disabled = self.page == 0
         self.next_page.disabled = self.page >= self.total_pages - 1
 
-    def _build_embed(self) -> discord.Embed:
+    def build_embed(self) -> discord.Embed:
         start = self.page * PAGE_SIZE
         end = start + PAGE_SIZE
         page_items = self.breakdown[start:end]
@@ -204,7 +223,7 @@ class PortfolioView(discord.ui.View):
         if self.page > 0:
             self.page -= 1
             self._update_buttons()
-            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
         else:
             await interaction.response.defer()
 
@@ -213,7 +232,7 @@ class PortfolioView(discord.ui.View):
         if self.page < self.total_pages - 1:
             self.page += 1
             self._update_buttons()
-            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
         else:
             await interaction.response.defer()
 
@@ -221,7 +240,99 @@ class PortfolioView(discord.ui.View):
         return interaction.user.id == self.author_id
 
 
-class MusicCommands(commands.Cog):
+class ConfirmUnlinkView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+
+    @discord.ui.button(label="Confirm Delete", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("You cannot confirm this action.", ephemeral=True)
+            return
+        try:
+            from services.database import get_db
+            conn = get_db()
+            try:
+                conn.execute('DELETE FROM scrobbles WHERE discord_id = ?', (self.author_id,))
+                conn.execute('DELETE FROM user_guilds WHERE discord_id = ?', (self.author_id,))
+                conn.execute('DELETE FROM users WHERE discord_id = ?', (self.author_id,))
+                conn.commit()
+            finally:
+                conn.close()
+            await interaction.response.edit_message(content="Your account and all data have been deleted.", view=None)
+        except Exception as e:
+            logger.error("Failed to unlink user %s: %s", self.author_id, e)
+            await interaction.response.edit_message(content="Something went wrong while deleting your account. Try again later.", view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("You cannot cancel this action.", ephemeral=True)
+            return
+        await interaction.response.edit_message(content="Account deletion cancelled.", view=None)
+
+
+class TransactionPaginationView(discord.ui.View):
+    def __init__(self, author_id: int, username: str, rows: list[dict]):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.username = username
+        self.rows = rows
+        self.page = 0
+        self.total_pages = max(1, (len(rows) + TXN_PAGE_SIZE - 1) // TXN_PAGE_SIZE)
+        if self.total_pages <= 1:
+            self.clear_items()
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.previous_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= self.total_pages - 1
+
+    def build_embed(self) -> discord.Embed:
+        start = self.page * TXN_PAGE_SIZE
+        end = start + TXN_PAGE_SIZE
+        page_rows = self.rows[start:end]
+
+        lines = []
+        for row in page_rows:
+            date_fmt = datetime.datetime.strptime(row['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
+            count = row.get('count', 1)
+            count_str = f" x{count}" if count > 1 else ""
+            lines.append(f"**{row['artist_name']}**{count_str} — {date_fmt} — {row['purchase_price']} listeners")
+
+        body = "\n".join(lines)
+        embed = discord.Embed(
+            title=f"{self.username}'s Transactions",
+            description=body,
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text=f"Page {self.page + 1}/{self.total_pages}")
+        return embed
+
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+            self._update_buttons()
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page < self.total_pages - 1:
+            self.page += 1
+            self._update_buttons()
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+
+class StockCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
@@ -238,13 +349,21 @@ class MusicCommands(commands.Cog):
             return
 
         last_claim = user_row['last_claim']
-        now_ts = int(discord.utils.utcnow().timestamp())
+        now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
         if now_ts - last_claim < 86400:
             remaining = 86400 - (now_ts - last_claim)
             hours = remaining // 3600
             minutes = (remaining % 3600) // 60
             await interaction.response.send_message(
                 f"{interaction.user.mention}, you can only claim once every 24 hours. Try again in {hours}h {minutes}m.",
+                ephemeral=True
+            )
+            return
+
+        allowed, remaining = check_lastfm_cooldown(interaction.user.id)
+        if not allowed:
+            await interaction.response.send_message(
+                f"Please wait {remaining}s before using Last.fm again.",
                 ephemeral=True
             )
             return
@@ -259,9 +378,15 @@ class MusicCommands(commands.Cog):
                 f"{interaction.user.mention}, could not reach Last.fm right now. Try again later."
             )
             return
-        total_money, gain_loss = await process_user_claim(user, interaction.user.id, guild_id)
-        gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
-        await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
+        try:
+            total_money, gain_loss = await process_user_claim(user, interaction.user.id, guild_id)
+            gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
+            await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
+        except Exception as e:
+            logger.error("Failed to process claim for user %s: %s", interaction.user.id, e)
+            await interaction.followup.send(
+                f"{interaction.user.mention}, something went wrong while processing your claim. Try again later."
+            )
 
 
     @app_commands.command(name="check", description="Recalculate your portfolio value (1h cooldown, admin bypass)")
@@ -275,7 +400,7 @@ class MusicCommands(commands.Cog):
             )
             return
 
-        now_ts = int(discord.utils.utcnow().timestamp())
+        now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
         is_admin = interaction.user.guild_permissions.administrator if interaction.guild else False
 
         if not is_admin:
@@ -289,15 +414,28 @@ class MusicCommands(commands.Cog):
                 )
                 return
 
+        allowed, remaining = check_lastfm_cooldown(interaction.user.id)
+        if not allowed:
+            await interaction.response.send_message(
+                f"Please wait {remaining}s before using Last.fm again.",
+                ephemeral=True
+            )
+            return
+
         await interaction.response.defer()
-        logger.info("Checking portfolio for user: %s (admin=%s)", interaction.user.name, is_admin)
-        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        total_money, gain_loss = calculate_portfolio_value(interaction.user.id, today_str)
-        gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
-        update_user_money(interaction.user.id, total_money)
-        if not is_admin:
-            update_last_preview(interaction.user.id, now_ts)
-        await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
+        try:
+            today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+            total_money, gain_loss = calculate_portfolio_value(interaction.user.id, today_str)
+            gain_str = f" (+{gain_loss:.2f}%)" if gain_loss >= 0 else f" ({gain_loss:.2f}%)"
+            update_user_money(interaction.user.id, total_money)
+            if not is_admin:
+                update_last_preview(interaction.user.id, now_ts)
+            await interaction.followup.send(f"{interaction.user.mention}, your portfolio is worth **{total_money:.2f}€**{gain_str}")
+        except Exception as e:
+            logger.error("Failed to check portfolio for user %s: %s", interaction.user.id, e)
+            await interaction.followup.send(
+                f"{interaction.user.mention}, something went wrong while checking your portfolio. Try again later."
+            )
 
 
     @app_commands.command(name="balance", description="View your balance")
@@ -312,36 +450,42 @@ class MusicCommands(commands.Cog):
             return
 
         await interaction.response.defer()
-        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        yesterday_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+        try:
+            today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+            yesterday_str = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
 
-        stats = get_balance_stats(interaction.user.id, today_str, yesterday_str)
+            stats = get_balance_stats(interaction.user.id, today_str, yesterday_str)
 
-        embed = discord.Embed(
-            title="Portfolio Balance",
-            color=discord.Color.blue()
-        )
+            embed = discord.Embed(
+                title="Portfolio Balance",
+                color=discord.Color.blue()
+            )
 
-        embed.add_field(name="💰 Value", value=f"{stats['total_value']:.2f}€", inline=True)
-        embed.add_field(name="📊 Shares", value=str(stats['total_shares']), inline=True)
-        embed.add_field(name="🎨 Artists", value=str(stats['diversity']), inline=True)
+            embed.add_field(name="💰 Value", value=f"{stats['total_value']:.2f}€", inline=True)
+            embed.add_field(name="📊 Shares", value=str(stats['total_shares']), inline=True)
+            embed.add_field(name="🎨 Artists", value=str(stats['diversity']), inline=True)
 
-        if stats['overall_gain'] >= 0:
-            embed.add_field(name="📈 Overall", value=f"+{stats['overall_gain']:.2f}%", inline=True)
-        else:
-            embed.add_field(name="📉 Overall", value=f"{stats['overall_gain']:.2f}%", inline=True)
-
-        if stats['today_change'] is not None:
-            if stats['today_change'] >= 0:
-                embed.add_field(name="📅 Today", value=f"+{stats['today_change']:.2f}%", inline=True)
+            if stats['overall_gain'] >= 0:
+                embed.add_field(name="📈 Overall", value=f"+{stats['overall_gain']:.2f}%", inline=True)
             else:
-                embed.add_field(name="📅 Today", value=f"{stats['today_change']:.2f}%", inline=True)
-        else:
-            embed.add_field(name="📅 Today", value="N/A", inline=True)
+                embed.add_field(name="📉 Overall", value=f"{stats['overall_gain']:.2f}%", inline=True)
 
-        embed.add_field(name="🏆 Top Holding", value=stats['top_holding'], inline=True)
+            if stats['today_change'] is not None:
+                if stats['today_change'] >= 0:
+                    embed.add_field(name="📅 Today", value=f"+{stats['today_change']:.2f}%", inline=True)
+                else:
+                    embed.add_field(name="📅 Today", value=f"{stats['today_change']:.2f}%", inline=True)
+            else:
+                embed.add_field(name="📅 Today", value="N/A", inline=True)
 
-        await interaction.followup.send(embed=embed)
+            embed.add_field(name="🏆 Top Holding", value=stats['top_holding'], inline=True)
+
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error("Failed to get balance for user %s: %s", interaction.user.id, e)
+            await interaction.followup.send(
+                f"{interaction.user.mention}, something went wrong while fetching your balance. Try again later."
+            )
 
 
     @app_commands.command(name="portfolio", description="View your portfolio breakdown")
@@ -356,19 +500,25 @@ class MusicCommands(commands.Cog):
             return
 
         await interaction.response.defer()
-        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        breakdown = get_portfolio_breakdown(interaction.user.id, today_str)
-        if not breakdown:
-            await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
-            return
+        try:
+            today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+            breakdown = get_portfolio_breakdown(interaction.user.id, today_str)
+            if not breakdown:
+                await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
+                return
 
-        total_value = sum(item['current_value'] for item in breakdown)
-        total_shares = sum(item['shares'] for item in breakdown)
-        total_base = BASE_SHARE_VALUE * total_shares
-        total_gain_percent = ((total_value - total_base) / total_base * 100) if total_base > 0 else 0.0
+            total_value = sum(item['current_value'] for item in breakdown)
+            total_shares = sum(item['shares'] for item in breakdown)
+            total_base = BASE_SHARE_VALUE * total_shares
+            total_gain_percent = ((total_value - total_base) / total_base * 100) if total_base > 0 else 0.0
 
-        view = PortfolioView(interaction.user.id, breakdown, total_value, total_shares, total_gain_percent)
-        await interaction.followup.send(embed=view._build_embed(), view=view)
+            view = PortfolioView(interaction.user.id, breakdown, total_value, total_shares, total_gain_percent)
+            await interaction.followup.send(embed=view.build_embed(), view=view)
+        except Exception as e:
+            logger.error("Failed to get portfolio for user %s: %s", interaction.user.id, e)
+            await interaction.followup.send(
+                f"{interaction.user.mention}, something went wrong while fetching your portfolio. Try again later."
+            )
 
 
     @app_commands.command(name="allocation", description="View your portfolio allocation as a pie chart")
@@ -383,103 +533,152 @@ class MusicCommands(commands.Cog):
             return
 
         await interaction.response.defer()
-        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        breakdown = get_portfolio_breakdown(interaction.user.id, today_str)
-        if not breakdown:
-            await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
-            return
-
-        total_value = sum(item['current_value'] for item in breakdown)
         try:
-            chart_path = generate_allocation_chart(breakdown, total_value)
-        except Exception as e:
-            logger.error("Failed to generate allocation chart: %s", e)
-            await interaction.followup.send("Could not generate chart right now. Try again later.")
-            return
-        if chart_path:
+            today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+            breakdown = get_portfolio_breakdown(interaction.user.id, today_str)
+            if not breakdown:
+                await interaction.followup.send(f"{interaction.user.mention}, you have no shares yet.")
+                return
+
+            total_value = sum(item['current_value'] for item in breakdown)
             try:
-                embed = discord.Embed(
-                    title="Portfolio Allocation",
-                    description="Your holdings by artist value",
-                    color=discord.Color.blue()
-                )
-                file = discord.File(chart_path, filename='allocation.png')
-                embed.set_image(url='attachment://allocation.png')
-                await interaction.followup.send(embed=embed, file=file)
-            finally:
-                os.unlink(chart_path)
-        else:
-            await interaction.followup.send("Need at least 2 artists to show allocation.")
+                chart_path = generate_allocation_chart(breakdown, total_value)
+            except Exception as e:
+                logger.error("Failed to generate allocation chart: %s", e)
+                await interaction.followup.send("Could not generate chart right now. Try again later.")
+                return
+            if chart_path:
+                try:
+                    embed = discord.Embed(
+                        title="Portfolio Allocation",
+                        description="Your holdings by artist value",
+                        color=discord.Color.blue()
+                    )
+                    file = discord.File(chart_path, filename='allocation.png')
+                    embed.set_image(url='attachment://allocation.png')
+                    await interaction.followup.send(embed=embed, file=file)
+                finally:
+                    os.unlink(chart_path)
+            else:
+                await interaction.followup.send("Need at least 2 artists to show allocation.")
+        except Exception as e:
+            logger.error("Failed to get allocation for user %s: %s", interaction.user.id, e)
+            await interaction.followup.send(
+                f"{interaction.user.mention}, something went wrong while generating your allocation chart. Try again later."
+            )
 
 
     @app_commands.command(name="leaderboard", description="View the leaderboard")
     async def slash_leaderboard(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id if interaction.guild else 0
         await interaction.response.defer()
-        from services.database import get_db
-        conn = get_db()
-        rows = conn.execute(
-            '''SELECT u.username, u.money
-               FROM users u
-               JOIN user_guilds ug ON u.discord_id = ug.discord_id
-               WHERE ug.guild_id = ?
-               ORDER BY u.money DESC
-               LIMIT 10''',
-            (guild_id,)
-        ).fetchall()
-        conn.close()
+        try:
+            from services.database import get_db
+            conn = get_db()
+            try:
+                rows = conn.execute(
+                    '''SELECT u.username, u.money
+                       FROM users u
+                       JOIN user_guilds ug ON u.discord_id = ug.discord_id
+                       WHERE ug.guild_id = ?
+                       ORDER BY u.money DESC
+                       LIMIT 10''',
+                    (guild_id,)
+                ).fetchall()
+            finally:
+                conn.close()
 
-        if not rows:
+            if not rows:
+                embed = discord.Embed(
+                    title="Leaderboard",
+                    description="No users yet.",
+                    color=discord.Color.gold()
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+            lines = []
+            for rank, row in enumerate(rows, start=1):
+                lines.append(f"**{rank}.** {row['username']} — {row['money']:.2f}€")
+
             embed = discord.Embed(
                 title="Leaderboard",
-                description="No users yet.",
+                description="\n".join(lines),
                 color=discord.Color.gold()
             )
             await interaction.followup.send(embed=embed)
-            return
-
-        lines = []
-        for rank, row in enumerate(rows, start=1):
-            lines.append(f"**{rank}.** {row['username']} — {row['money']:.2f}€")
-
-        embed = discord.Embed(
-            title="Leaderboard",
-            description="\n".join(lines),
-            color=discord.Color.gold()
-        )
-        await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error("Failed to get leaderboard for guild %s: %s", guild_id, e)
+            await interaction.followup.send(
+                "Something went wrong while fetching the leaderboard. Try again later."
+            )
 
 
     @app_commands.command(name="lastfm", description="Set your Last.fm username")
     async def slash_lastfm(self, interaction: discord.Interaction, lastfm_username: str):
+        if not lastfm_username.strip():
+            await interaction.response.send_message("Please provide a valid Last.fm username.", ephemeral=True)
+            return
+        allowed, remaining = check_lastfm_cooldown(interaction.user.id)
+        if not allowed:
+            await interaction.response.send_message(
+                f"Please wait {remaining}s before using Last.fm again.",
+                ephemeral=True
+            )
+            return
+        await interaction.response.defer()
         guild_id = interaction.guild.id if interaction.guild else 0
         try:
             await validate_lastfm_user(lastfm_username)
             insert_user(interaction.user.id, guild_id, interaction.user.name, lastfm_username)
-            await interaction.response.send_message(f"{interaction.user.mention}, your Last.fm username has been set to {lastfm_username}.")
+            await interaction.followup.send(f"{interaction.user.mention}, your Last.fm username has been set to {lastfm_username}.")
         except Exception as e:
             logger.error("Failed to validate Last.fm user %s: %s", lastfm_username, e)
-            await interaction.response.send_message("Last.fm user not found or could not be reached.", ephemeral=True)
+            await interaction.followup.send("Last.fm user not found or could not be reached.", ephemeral=True)
+
+
+    @app_commands.command(name="unlink", description="Delete your account and all data")
+    async def slash_unlink(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id if interaction.guild else 0
+        user_row = get_user(interaction.user.id)
+        if not user_row:
+            await interaction.response.send_message("You don't have an account linked.", ephemeral=True)
+            return
+
+        view = ConfirmUnlinkView(interaction.user.id)
+        await interaction.response.send_message(
+            "⚠️ This will permanently delete your account, all scrobbles, and portfolio data. Are you sure?",
+            view=view,
+            ephemeral=True
+        )
 
 
     @app_commands.command(name="artist", description="Look up an artist's stock info")
     async def slash_artist(self, interaction: discord.Interaction, artist_name: str):
-        if len(artist_name.strip()) == 0 or len(artist_name) > 100:
+        if not artist_name.strip() or len(artist_name) > 100:
             await interaction.response.send_message("Please provide a valid artist name.", ephemeral=True)
             return
         guild_id = interaction.guild.id if interaction.guild else 0
         today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+        allowed, remaining = check_lastfm_cooldown(interaction.user.id)
+        if not allowed:
+            await interaction.response.send_message(
+                f"Please wait {remaining}s before checking another artist.",
+                ephemeral=True
+            )
+            return
+        await interaction.response.defer()
         try:
-            info = await get_artist_info(artist_name, today_str, guild_id)
+            info = await get_artist_info(artist_name, today_str)
         except Exception as e:
             logger.error("Failed to fetch artist info for %s: %s", artist_name, e)
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Could not look up **{artist_name}** right now. Try again later.",
                 ephemeral=True
             )
             return
         if not info:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"No data found for **{artist_name}**. It may not be tracked yet.",
                 ephemeral=True
             )
@@ -501,44 +700,57 @@ class MusicCommands(commands.Cog):
         embed.add_field(name="Shares", value=str(info['total_shares']), inline=True)
         embed.add_field(name="Change", value=f"{gain:+.2f}%", inline=True)
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
 
     @app_commands.command(name="history", description="View an artist's listener history")
     async def slash_history(self, interaction: discord.Interaction, artist_name: str):
-        if len(artist_name.strip()) == 0 or len(artist_name) > 100:
+        if not artist_name.strip() or len(artist_name) > 100:
             await interaction.response.send_message("Please provide a valid artist name.", ephemeral=True)
             return
-        await interaction.response.defer()
-        history = get_artist_price_history(artist_name)
-        if not history:
-            await interaction.followup.send(f"No price history found for **{artist_name}**.")
+        allowed, remaining = check_lastfm_cooldown(interaction.user.id)
+        if not allowed:
+            await interaction.response.send_message(
+                f"Please wait {remaining}s before checking another artist.",
+                ephemeral=True
+            )
             return
+        await interaction.response.defer()
+        try:
+            history = get_artist_price_history(artist_name)
+            if not history:
+                await interaction.followup.send(f"No price history found for **{artist_name}**.")
+                return
 
-        lines = []
-        prev_listeners = None
-        for entry in history:
-            date_fmt = datetime.datetime.strptime(entry['date'], '%Y%m%d').strftime('%d/%m/%Y')
-            listeners = entry['listeners']
-            if prev_listeners is None:
-                trend = "➡️"
-            elif listeners > prev_listeners:
-                trend = "📈"
-            elif listeners < prev_listeners:
-                trend = "📉"
-            else:
-                trend = "➡️"
-            prev_listeners = listeners
-            value = listeners / 100_000
-            lines.append(f"{trend} {date_fmt}: {format_listeners(listeners)} listeners ({value:.2f}€)")
+            lines = []
+            prev_listeners = None
+            for entry in history:
+                date_fmt = datetime.datetime.strptime(entry['date'], '%Y%m%d').strftime('%d/%m/%Y')
+                listeners = entry['listeners']
+                if prev_listeners is None:
+                    trend = "➡️"
+                elif listeners > prev_listeners:
+                    trend = "📈"
+                elif listeners < prev_listeners:
+                    trend = "📉"
+                else:
+                    trend = "➡️"
+                prev_listeners = listeners
+                value = listeners / 100_000
+                lines.append(f"{trend} {date_fmt}: {format_listeners(listeners)} listeners ({value:.2f}€)")
 
-        body = "\n".join(lines)
-        embed = discord.Embed(
-            title=f"Price History: {history[-1].get('artist_name', artist_name)}",
-            description=body,
-            color=discord.Color.blue()
-        )
-        await interaction.followup.send(embed=embed)
+            body = "\n".join(lines)
+            embed = discord.Embed(
+                title=f"Price History: {history[-1].get('artist_name', artist_name)}",
+                description=body,
+                color=discord.Color.blue()
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error("Failed to get price history for %s: %s", artist_name, e)
+            await interaction.followup.send(
+                f"Something went wrong while fetching price history for **{artist_name}**. Try again later."
+            )
 
 
     @app_commands.command(name="transactions", description="View your transaction history")
@@ -560,15 +772,19 @@ class MusicCommands(commands.Cog):
                 await interaction.response.send_message("No transactions yet.", ephemeral=True)
             return
 
-        grouped = {}
-        for row in rows:
-            name = row['artist_name']
-            if name not in grouped:
-                grouped[name] = []
-            grouped[name].append(row)
+        if artist_name:
+            view = TransactionPaginationView(interaction.user.id, interaction.user.name, rows)
+            await interaction.response.send_message(embed=view.build_embed(), view=view)
+        else:
+            grouped = {}
+            for row in rows:
+                name = row['artist_name']
+                if name not in grouped:
+                    grouped[name] = []
+                grouped[name].append(row)
 
-        view = TransactionsView(interaction.user.id, interaction.user.name, grouped, artist_name)
-        await interaction.response.send_message(embed=view._build_embed(), view=view)
+            view = TransactionsView(interaction.user.id, interaction.user.name, grouped, artist_name)
+            await interaction.response.send_message(embed=view.build_embed(), view=view)
 
 
     @app_commands.command(name="rules", description="How to play")
@@ -594,41 +810,54 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name="market", description="View market overview: top gainers, losers, and most held artists")
     async def slash_market(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        guild_id = interaction.guild.id if interaction.guild else 0
-        overview = get_market_overview(guild_id)
-
-        sections = []
-
-        if overview['gainers']:
-            lines = []
-            for entry in overview['gainers']:
-                lines.append(f"📈 **{entry['artist_name']}**: {format_listeners(entry['today_listeners'])} (+{entry['change_percent']:.2f}%)")
-            sections.append("**Top Gainers**\n" + "\n".join(lines))
-
-        if overview['losers']:
-            lines = []
-            for entry in overview['losers']:
-                lines.append(f"📉 **{entry['artist_name']}**: {format_listeners(entry['today_listeners'])} ({entry['change_percent']:.2f}%)")
-            sections.append("**Top Losers**\n" + "\n".join(lines))
-
-        if overview['most_held']:
-            lines = []
-            for entry in overview['most_held']:
-                lines.append(f"🏦 **{entry['artist_name']}**: {entry['count']} shares")
-            sections.append("**Most Held**\n" + "\n".join(lines))
-
-        if not sections:
-            await interaction.followup.send("No market data available yet.")
+        allowed, remaining = check_lastfm_cooldown(interaction.user.id)
+        if not allowed:
+            await interaction.response.send_message(
+                f"Please wait {remaining}s before checking the market again.",
+                ephemeral=True
+            )
             return
+        await interaction.response.defer()
+        try:
+            guild_id = interaction.guild.id if interaction.guild else 0
+            overview = get_market_overview(guild_id)
 
-        body = "\n\n".join(sections)
-        embed = discord.Embed(
-            title="Market Overview",
-            description=body,
-            color=discord.Color.blue()
-        )
-        await interaction.followup.send(embed=embed)
+            sections = []
+
+            if overview['gainers']:
+                lines = []
+                for entry in overview['gainers']:
+                    lines.append(f"📈 **{entry['artist_name']}**: {format_listeners(entry['today_listeners'])} (+{entry['change_percent']:.2f}%)")
+                sections.append("**Top Gainers**\n" + "\n".join(lines))
+
+            if overview['losers']:
+                lines = []
+                for entry in overview['losers']:
+                    lines.append(f"📉 **{entry['artist_name']}**: {format_listeners(entry['today_listeners'])} ({entry['change_percent']:.2f}%)")
+                sections.append("**Top Losers**\n" + "\n".join(lines))
+
+            if overview['most_held']:
+                lines = []
+                for entry in overview['most_held']:
+                    lines.append(f"🏦 **{entry['artist_name']}**: {entry['count']} shares")
+                sections.append("**Most Held**\n" + "\n".join(lines))
+
+            if not sections:
+                await interaction.followup.send("No market data available yet.")
+                return
+
+            body = "\n\n".join(sections)
+            embed = discord.Embed(
+                title="Market Overview",
+                description=body,
+                color=discord.Color.blue()
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error("Failed to get market overview for guild %s: %s", guild_id, e)
+            await interaction.followup.send(
+                "Something went wrong while fetching the market overview. Try again later."
+            )
 
 
     @app_commands.command(name="help", description="Show all commands")
@@ -638,6 +867,7 @@ class MusicCommands(commands.Cog):
             "/claim - Claim your daily portfolio value\n"
             "/leaderboard - View the leaderboard\n"
             "/lastfm <username> - Link your Last.fm account\n"
+            "/unlink - Delete your account and all data\n"
             "/check - Recalculate your portfolio value (1h cooldown)\n"
             "/balance - View your balance\n"
             "/portfolio - View your portfolio breakdown\n"
@@ -673,8 +903,10 @@ class MusicCommands(commands.Cog):
         hour = int(time.split(':')[0])
         guild_id = interaction.guild.id if interaction.guild else 0
         set_guild_config(guild_id, channel.id, hour, timezone)
+        from bot import invalidate_guild_config_cache
+        invalidate_guild_config_cache()
 
-        tz_str = f"UTC{timezone}" if timezone.startswith('+') else f"UTC{timezone}"
+        tz_str = f"UTC{timezone}"
         await interaction.response.send_message(
             f"Daily market summary configured: channel {channel.mention}, will fire at {time} your local time ({tz_str})",
             ephemeral=True
@@ -682,4 +914,4 @@ class MusicCommands(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(MusicCommands(bot))
+    await bot.add_cog(StockCommands(bot))

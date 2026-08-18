@@ -1,5 +1,9 @@
 import datetime
 import logging
+import logging.handlers
+import os
+import signal
+import asyncio
 import discord
 from discord.ext import commands, tasks
 from config import DISCORD_TOKEN
@@ -8,10 +12,11 @@ from services.portfolio import get_market_overview
 from cogs.commands import setup as commands_setup
 from backup_db import run_backup
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-)
+log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot.log')
+handler = logging.handlers.RotatingFileHandler(log_path, maxBytes=5*1024*1024, backupCount=3, encoding='utf-8')
+handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+logging.getLogger().addHandler(handler)
 
 logger = logging.getLogger('lastfm_bot')
 
@@ -20,12 +25,21 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 _last_sync_ts = 0
+_guild_config_cache: list[dict] = []
+_guild_config_cache_ts = 0
+GUILD_CONFIG_CACHE_TTL = 300
+_db_initialized = False
+
+
+def invalidate_guild_config_cache():
+    global _guild_config_cache_ts
+    _guild_config_cache_ts = 0
 
 
 @bot.event
 async def on_ready():
     init_db()
-    global _last_sync_ts
+    global _last_sync_ts, _guild_config_cache, _guild_config_cache_ts
     now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
     if now_ts - _last_sync_ts >= 3600:
         try:
@@ -37,17 +51,48 @@ async def on_ready():
     else:
         logger.info('Skipping slash command sync; last sync was %ds ago', now_ts - _last_sync_ts)
     logger.info('Logged in as %s', bot.user)
-    send_market_summary.start()
-    daily_backup.start()
+    if not send_market_summary.is_running():
+        send_market_summary.start()
+    if not daily_backup.is_running():
+        daily_backup.start()
+
+
+@bot.event
+async def on_disconnect():
+    logger.warning('Bot disconnected from Discord')
+
+
+def _shutdown_handler(signum, frame):
+    logger.info('Received shutdown signal %s, cleaning up...', signum)
+    send_market_summary.stop()
+    daily_backup.stop()
+    raise SystemExit(0)
+
+
+if hasattr(signal, 'SIGINT'):
+    signal.signal(signal.SIGINT, _shutdown_handler)
+if hasattr(signal, 'SIGTERM'):
+    signal.signal(signal.SIGTERM, _shutdown_handler)
 
 
 @tasks.loop(minutes=1)
 async def send_market_summary():
+    global _guild_config_cache, _guild_config_cache_ts
     now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_ts = int(now_utc.timestamp())
+
+    if now_ts - _guild_config_cache_ts >= GUILD_CONFIG_CACHE_TTL:
+        try:
+            _guild_config_cache = get_all_guild_configs()
+            _guild_config_cache_ts = now_ts
+        except Exception as e:
+            logger.error('Failed to refresh guild config cache: %s', e)
+            return
+
     if now_utc.minute != 0:
         return
 
-    for config in get_all_guild_configs():
+    for config in _guild_config_cache:
         channel_id = config.get('market_channel_id')
         market_hour = config.get('market_hour_local')
         market_timezone = config.get('market_timezone', 'UTC')
@@ -112,6 +157,26 @@ async def daily_backup():
         logger.error('Failed to create daily backup: %s', e)
 
 
+@send_market_summary.error
+async def send_market_summary_error(error):
+    logger.error('Market summary task failed: %s', error, exc_info=error)
+    if not send_market_summary.is_running():
+        await asyncio.sleep(5)
+        if not send_market_summary.is_running():
+            send_market_summary.start()
+            logger.info('Restarted market summary task after failure')
+
+
+@daily_backup.error
+async def daily_backup_error(error):
+    logger.error('Daily backup task failed: %s', error, exc_info=error)
+    if not daily_backup.is_running():
+        await asyncio.sleep(5)
+        if not daily_backup.is_running():
+            daily_backup.start()
+            logger.info('Restarted daily backup task after failure')
+
+
 async def main():
     async with bot:
         await commands_setup(bot)
@@ -120,5 +185,4 @@ async def main():
 
 if __name__ == '__main__':
     logger.info('Starting bot...')
-    import asyncio
     asyncio.run(main())

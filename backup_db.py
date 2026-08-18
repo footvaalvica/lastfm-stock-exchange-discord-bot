@@ -1,10 +1,12 @@
 import datetime
+import logging
 import os
 import shutil
 
 DB_PATH = 'db.sqlite3'
 BACKUP_DIR = 'backups'
-RETENTION_DAYS = 2
+RETENTION_DAYS = int(os.getenv('BACKUP_RETENTION_DAYS', '2'))
+logger = logging.getLogger('lastfm_bot')
 
 
 def run_backup():
@@ -18,7 +20,7 @@ def run_backup():
         raise FileNotFoundError(f"Database not found at {DB_PATH}")
 
     shutil.copy2(DB_PATH, backup_path)
-    print(f"Backup created: {backup_path}")
+    logger.info('Backup created: %s', backup_path)
 
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=RETENTION_DAYS)
     for fname in os.listdir(BACKUP_DIR):
@@ -28,7 +30,7 @@ def run_backup():
         mtime = datetime.datetime.fromtimestamp(os.path.getmtime(fpath), tz=datetime.timezone.utc)
         if mtime < cutoff:
             os.remove(fpath)
-            print(f"Deleted old backup: {fname}")
+            logger.info('Deleted old backup: %s', fname)
 
 
 if __name__ == '__main__':

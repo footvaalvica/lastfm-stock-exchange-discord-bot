@@ -295,7 +295,7 @@ async def test_get_artist_info_uses_yesterday_as_base(tmp_db):
     insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
     insert_scrobble(123456789, GUILD_ID, "Phoebe Bridgers", 2251500, yesterday)
 
-    info = await get_artist_info("Phoebe Bridgers", today, GUILD_ID)
+    info = await get_artist_info("Phoebe Bridgers", today)
     assert info is not None
     assert info['current_price'] == 2253102
     assert info['base_price'] == 2251500
@@ -307,7 +307,7 @@ async def test_get_artist_info_fallback_to_current_when_no_history(tmp_db):
     today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
     upsert_snapshot("Coldplay", 5000000, today)
 
-    info = await get_artist_info("Coldplay", today, GUILD_ID)
+    info = await get_artist_info("Coldplay", today)
     assert info is not None
     assert info['base_price'] == 5000000
     assert info['gain_loss_percent'] == 0.0

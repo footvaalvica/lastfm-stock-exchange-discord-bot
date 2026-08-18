@@ -9,14 +9,15 @@ logger = logging.getLogger('lastfm_bot')
 MAX_RETRIES = 3
 BASE_DELAY = 1.0
 MAX_DELAY = 10.0
-RATE_LIMIT_DELAY = 0.2
+RATE_LIMIT_DELAY = 0.3
+FETCH_TIMEOUT = 30
 
 
 async def _fetch_with_retry(fn, *args, **kwargs):
     last_exception = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            result = await asyncio.to_thread(fn, *args, **kwargs)
+            result = await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), timeout=FETCH_TIMEOUT)
             await asyncio.sleep(RATE_LIMIT_DELAY)
             return result
         except pylast.WSError as e:
@@ -32,6 +33,12 @@ async def _fetch_with_retry(fn, *args, **kwargs):
             else:
                 logger.error(f"Last.fm API error {error_code}: {e}")
                 raise
+        except asyncio.TimeoutError:
+            last_exception = TimeoutError(f"Last.fm request timed out after {FETCH_TIMEOUT}s on attempt {attempt}")
+            logger.error(str(last_exception))
+            if attempt < MAX_RETRIES:
+                delay = min(BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 0.5), MAX_DELAY)
+                await asyncio.sleep(delay)
         except Exception as e:
             last_exception = e
             logger.error(f"Unexpected Last.fm error on attempt {attempt}: {type(e).__name__}: {e}")
@@ -41,7 +48,7 @@ async def _fetch_with_retry(fn, *args, **kwargs):
     raise last_exception
 
 
-async def fetch_recent_tracks(user, time_from=None, limit=200):
+async def fetch_recent_tracks(user, time_from=None, limit=100):
     def _fetch():
         return user.get_recent_tracks(now_playing=False, limit=limit, time_from=time_from)
     return await _fetch_with_retry(_fetch)
