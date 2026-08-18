@@ -16,6 +16,7 @@
 
   # https://devenv.sh/services/
   # services.postgres.enable = true;
+  dotenv.enable = true;
 
   # https://devenv.sh/scripts/
   scripts.hello.exec = ''
