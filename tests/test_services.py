@@ -252,6 +252,34 @@ def test_get_price_changes(tmp_db):
     assert drake['change_percent'] == pytest.approx(-2.5, abs=1e-3)
 
 
+def test_get_price_changes_week_uses_earliest_in_range(tmp_db):
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    five_days_ago = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=5)).isoformat().replace('-', '')
+    upsert_snapshot("Taylor Swift", 10000000, five_days_ago)
+    upsert_snapshot("Taylor Swift", 15000000, today)
+
+    changes = get_price_changes(days=7)
+    assert len(changes) == 1
+    taylor = changes[0]
+    assert taylor['artist_name'] == 'Taylor Swift'
+    assert taylor['past_listeners'] == 10000000
+    assert taylor['change_percent'] == pytest.approx(50.0, abs=1e-3)
+
+
+def test_get_price_changes_month_uses_earliest_in_range(tmp_db):
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+    twenty_days_ago = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=20)).isoformat().replace('-', '')
+    upsert_snapshot("Drake", 5000000, twenty_days_ago)
+    upsert_snapshot("Drake", 8000000, today)
+
+    changes = get_price_changes(days=30)
+    assert len(changes) == 1
+    drake = changes[0]
+    assert drake['artist_name'] == 'Drake'
+    assert drake['past_listeners'] == 5000000
+    assert drake['change_percent'] == pytest.approx(50.0, abs=1e-3)
+
+
 def test_get_most_held_artists(tmp_db):
     insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
     insert_user(999999999, GUILD_ID, "bob", "bob_lfm")

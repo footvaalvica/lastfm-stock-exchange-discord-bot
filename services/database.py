@@ -424,6 +424,15 @@ def get_price_changes(days: int | str = 1) -> list[dict]:
                        WHERE ap2.artist_name = artist_popularity.artist_name COLLATE NOCASE
                    )'''
             ).fetchall()
+        elif isinstance(days, int) and days > 1:
+            cutoff = (now_utc.date() - datetime.timedelta(days=days)).isoformat().replace('-', '')
+            past_rows = conn.execute(
+                '''SELECT artist_name, MIN(timestamp) as timestamp, listeners
+                   FROM artist_popularity
+                   WHERE timestamp >= ? AND timestamp < ?
+                   GROUP BY artist_name COLLATE NOCASE''',
+                (cutoff, today)
+            ).fetchall()
         else:
             past = (now_utc.date() - datetime.timedelta(days=days)).isoformat().replace('-', '')
             past_rows = conn.execute(
