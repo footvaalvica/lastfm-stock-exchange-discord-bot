@@ -5,7 +5,7 @@
   env.GREET = "devenv";
 
   # https://devenv.sh/packages/
-  packages = [ pkgs.git pkgs.python313Packages.discordpy pkgs.python313Packages.pylast pkgs.python313Packages.tinydb ];
+  packages = [ pkgs.git pkgs.python313Packages.discordpy pkgs.python313Packages.pylast pkgs.python313Packages.tinydb pkgs.python313Packages.python-dotenv pkgs.python313Packages.matplotlib ];
 
   # https://devenv.sh/languages/
   languages.python.enable = true;
