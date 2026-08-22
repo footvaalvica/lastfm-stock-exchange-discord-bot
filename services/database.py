@@ -91,10 +91,40 @@ def init_db():
     conn.execute('CREATE INDEX IF NOT EXISTS idx_artist_scrobbles_artist_date ON artist_scrobbles(artist_name, scrobble_date)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guilds_discord_id ON user_guilds(discord_id)')
 
+    _migrate_schema(conn)
+
     conn.commit()
     conn.close()
     _db_initialized = True
     _db_path_at_init = DB_PATH
+
+
+def _migrate_schema(conn):
+    version_row = conn.execute("PRAGMA user_version").fetchone()
+    current_version = version_row[0] if version_row else 0
+
+    if current_version < 1:
+        columns = [row['name'] for row in conn.execute("PRAGMA table_info(scrobbles)").fetchall()]
+        if 'guild_id' in columns:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS scrobbles_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discord_id INTEGER NOT NULL,
+                    artist_name TEXT NOT NULL,
+                    purchase_price INTEGER DEFAULT 10,
+                    scrobble_date TEXT NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY (discord_id) REFERENCES users(discord_id),
+                    UNIQUE(discord_id, artist_name, scrobble_date)
+                )
+            ''')
+            conn.execute('''
+                INSERT INTO scrobbles_new (id, discord_id, artist_name, purchase_price, scrobble_date, count)
+                SELECT id, discord_id, artist_name, purchase_price, scrobble_date, count FROM scrobbles
+            ''')
+            conn.execute('DROP TABLE scrobbles')
+            conn.execute('ALTER TABLE scrobbles_new RENAME TO scrobbles')
+        conn.execute("PRAGMA user_version = 1")
 
 
 def get_user(discord_id: int):
