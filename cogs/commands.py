@@ -51,6 +51,16 @@ def format_daily_total(count: int) -> str:
     return str(count)
 
 
+def format_currency(value: float) -> str:
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}B€"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M€"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}k€"
+    return f"{value:.2f}€"
+
+
 def generate_allocation_chart(breakdown: list[dict], total_value: float) -> str | None:
     if len(breakdown) <= 1:
         return None
@@ -193,7 +203,7 @@ class PortfolioView(discord.ui.View):
         for item in page_items:
             gain = item['gain_loss_percent']
             gain_str = f"{gain:+.2f}%"
-            lines.append(f"**{item['artist_name']}** ×{item['shares']}\n💰 {item['current_value']:.2f}€ | 📈 {gain_str}")
+            lines.append(f"**{item['artist_name']}** ×{item['shares']}\n💰 {format_currency(item['current_value'])} | 📈 {gain_str}")
 
         body = "\n".join(lines)
         embed = discord.Embed(
@@ -201,7 +211,7 @@ class PortfolioView(discord.ui.View):
             description=body,
             color=embed_color
         )
-        embed.set_footer(text=f"Total: {self.total_value:.2f}€ | {self.total_shares} shares | {self.total_gain_percent:+.2f}%")
+        embed.set_footer(text=f"Total: {format_currency(self.total_value)} | {self.total_shares} shares | {self.total_gain_percent:+.2f}%")
         return embed
 
     @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary)
@@ -462,7 +472,7 @@ class StockCommands(commands.Cog):
                 color=discord.Color.blue()
             )
 
-            embed.add_field(name="💰 Value", value=f"{stats['total_value']:.2f}€", inline=True)
+            embed.add_field(name="💰 Value", value=format_currency(stats['total_value']), inline=True)
             embed.add_field(name="📊 Shares", value=str(stats['total_shares']), inline=True)
             embed.add_field(name="🎨 Artists", value=str(stats['diversity']), inline=True)
 
@@ -600,7 +610,7 @@ class StockCommands(commands.Cog):
 
             lines = []
             for rank, row in enumerate(rows, start=1):
-                lines.append(f"**{rank}.** {row['username']} — {row['money']:.2f}€")
+                lines.append(f"**{rank}.** {row['username']} — {format_currency(row['money'])}")
 
             embed = discord.Embed(
                 title="Leaderboard",
