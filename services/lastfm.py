@@ -75,14 +75,6 @@ async def fetch_recent_tracks(user, time_from=None, limit=100):
     return await _fetch_with_retry(_fetch)
 
 
-async def get_artist_listener_count(artist_name: str) -> tuple[int, str]:
-    def _fetch():
-        artist = pylast.Artist(artist_name, network)
-        response = artist._request("artist.getInfo")
-        canonical_name = pylast._extract(response, "name")
-        listeners = int(pylast._extract(response, "listeners"))
-        return listeners, canonical_name
-    return await _fetch_with_retry(_fetch)
 
 
 async def validate_lastfm_user(lastfm_username: str):
@@ -91,7 +83,4 @@ async def validate_lastfm_user(lastfm_username: str):
     return await _fetch_with_retry(_fetch)
 
 
-async def get_lastfm_user(lastfm_username: str):
-    def _fetch():
-        return network.get_user(lastfm_username)
-    return await _fetch_with_retry(_fetch)
+

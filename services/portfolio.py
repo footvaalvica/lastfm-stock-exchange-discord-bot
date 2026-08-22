@@ -1,15 +1,16 @@
 import datetime
+import math
 import time
 import asyncio
 import pylast
 from services.database import (
     get_user, get_scrobbles, update_user_money_and_claim,
-    get_closest_snapshot, get_snapshot, get_latest_snapshot, get_db,
-    get_total_scrobbles_for_artist, get_price_changes, get_most_held_artists,
+    get_snapshot, get_db,
+    get_total_scrobbles_for_artist, get_artist_scrobble_history, get_price_changes, get_most_held_artists,
     get_snapshots_bulk, get_latest_snapshots_bulk, get_closest_snapshot_bulk,
     get_daily_scrobble_counts, _cap_daily_price, get_all_artists, upsert_snapshot
 )
-from services.lastfm import fetch_recent_tracks, get_artist_listener_count
+from services.lastfm import fetch_recent_tracks
 
 
 class LastFMPrivacyError(Exception):
@@ -17,13 +18,6 @@ class LastFMPrivacyError(Exception):
 
 
 BASE_SHARE_VALUE = 10.0
-
-DAILY_SCROBBLE_CAP = 200
-MULTIPLIER_TIERS = [
-    (100, 1.2),
-    (50, 1.1),
-]
-
 
 def get_claim_multiplier(discord_id: int) -> float:
     daily_counts = get_daily_scrobble_counts(discord_id, days=30)
@@ -52,6 +46,56 @@ def get_claim_multiplier(discord_id: int) -> float:
     if min_daily >= 50:
         return 1.1
     return 1.0
+
+def _get_active_user_count() -> int:
+    conn = get_db()
+    try:
+        cutoff_date = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=7)).isoformat().replace('-', '')
+        row = conn.execute('''
+            SELECT COUNT(DISTINCT discord_id) as count
+            FROM scrobbles
+            WHERE scrobble_date >= ?
+        ''', (cutoff_date,)).fetchone()
+        return max(row['count'], 1) if row else 1
+    finally:
+        conn.close()
+
+
+def calculate_volatility_price(artist_name: str, today_str: str) -> int:
+    history = get_artist_scrobble_history(artist_name, days=7)
+    if not history:
+        return BASE_SHARE_VALUE
+
+    counts = [count for _, count in history]
+    history_by_date = {date: count for date, count in history}
+
+    today_date = datetime.date.fromisoformat(f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:8]}")
+    yesterday_date = today_date - datetime.timedelta(days=1)
+    yesterday_str = yesterday_date.isoformat().replace('-', '')
+
+    today_count = history_by_date.get(today_str, 0)
+    yesterday_count = history_by_date.get(yesterday_str, 0)
+    mean_7d = sum(counts) / len(counts)
+
+    if mean_7d < 5:
+        yesterday_snapshot = get_snapshot(artist_name, yesterday_str)
+        base_price = yesterday_snapshot['daily_total'] if yesterday_snapshot else BASE_SHARE_VALUE
+        return max(base_price, 1)
+
+    yesterday_snapshot = get_snapshot(artist_name, yesterday_str)
+    base_price = yesterday_snapshot['daily_total'] if yesterday_snapshot else BASE_SHARE_VALUE
+
+    reference_count = max(today_count, yesterday_count)
+    active_users = _get_active_user_count()
+    if active_users <= 1:
+        return max(base_price, 1)
+
+    user_scale = 0.2 + 0.8 * min(active_users, 10) / 10
+    dampened = math.sqrt(reference_count) * 1 * user_scale
+    raw_price = BASE_SHARE_VALUE + dampened
+    capped_price = _cap_daily_price(base_price, raw_price)
+    return max(int(capped_price), 1)
+
 
 _ARTIST_INFO_CACHE_TTL = 300
 _ARTIST_INFO_CACHE_MAX = 1000
@@ -90,18 +134,19 @@ async def _get_artist_info_cached(artist_name: str, today_str: str) -> dict | No
         existing = get_snapshot(artist_name, today_str)
         if existing:
             canonical_name = existing['artist_name']
-            current_price = existing['listeners']
+            current_price = existing['daily_total']
         else:
-            listeners, canonical_name = await get_artist_listener_count(artist_name)
-            upsert_snapshot(canonical_name, listeners, today_str)
-            current_price = listeners
+            canonical_name = artist_name
+            effective_price = calculate_volatility_price(canonical_name, today_str)
+            upsert_snapshot(canonical_name, effective_price, today_str)
+            current_price = effective_price
 
         total_shares = get_total_scrobbles_for_artist(canonical_name)
 
         today_date = datetime.date.fromisoformat(today_str)
         yesterday_str = (today_date - datetime.timedelta(days=1)).isoformat().replace('-', '')
         yesterday_snapshot = get_snapshot(canonical_name, yesterday_str)
-        base_price = yesterday_snapshot['listeners'] if yesterday_snapshot else current_price
+        base_price = yesterday_snapshot['daily_total'] if yesterday_snapshot else current_price
         capped_price = _cap_daily_price(base_price, current_price)
 
         gain_loss_percent = ((capped_price / base_price) - 1) * 100 if base_price > 0 else 0.0
@@ -146,7 +191,7 @@ def calculate_portfolio_value(discord_id: int, today_str: str) -> tuple[float, f
         if yesterday_price is not None and yesterday_price > 0:
             current_price = _cap_daily_price(yesterday_price, current_price)
         has_price_data = current_price > 0
-        purchase_price = row['purchase_price']
+        purchase_price = row['purchase_price'] if row['purchase_price'] > 0 else BASE_SHARE_VALUE
         if not has_price_data or purchase_price <= 0:
             share_value = BASE_SHARE_VALUE * count
             gain_percent = 0.0
@@ -182,7 +227,7 @@ def get_balance_stats(discord_id: int, today_str: str, yesterday_str: str) -> di
         if artist_name not in artist_data:
             artist_data[artist_name] = {'shares': 0, 'total_purchase': 0}
         artist_data[artist_name]['shares'] += count
-        artist_data[artist_name]['total_purchase'] += row['purchase_price'] * count
+        artist_data[artist_name]['total_purchase'] += max(row['purchase_price'], BASE_SHARE_VALUE) * count
 
     artist_names = list(artist_data.keys())
     today_prices = get_snapshots_bulk(artist_names, today_str)
@@ -223,7 +268,7 @@ def get_balance_stats(discord_id: int, today_str: str, yesterday_str: str) -> di
     for row in rows:
         artist_name = row['artist_name']
         count = row['count']
-        purchase_price = row['purchase_price']
+        purchase_price = max(row['purchase_price'], BASE_SHARE_VALUE)
         price = yesterday_prices.get(artist_name, 0)
         if price <= 0 or purchase_price <= 0:
             yesterday_value += BASE_SHARE_VALUE * count
@@ -247,13 +292,13 @@ def get_balance_stats(discord_id: int, today_str: str, yesterday_str: str) -> di
 async def process_user_claim(user, discord_id: int, guild_id: int) -> tuple[float, float]:
     now = datetime.datetime.now(datetime.timezone.utc)
     today_str = now.date().isoformat().replace('-', '')
-    unix_timestamp = int(now.timestamp())
+    unix_scrobble_date = int(now.timestamp())
 
     user_row = get_user(discord_id)
     if not user_row:
         return 0.0, 0.0
 
-    last_claim = user_row['last_claim']
+    last_claim = int(user_row['last_claim'] or 0)
 
     if last_claim == 0:
         time_from = int((now - datetime.timedelta(days=1)).timestamp())
@@ -277,90 +322,67 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> tuple[floa
     artist_dates: dict[str, str] = {}
     for scrobble in daily_scrobbles:
         artist_name = scrobble.track.artist.name
-        scrobble_timestamp = datetime.datetime.fromtimestamp(
+        scrobble_scrobble_date = datetime.datetime.fromtimestamp(
             int(scrobble.timestamp), datetime.timezone.utc
         ).date().isoformat().replace('-', '')
         artist_plays[artist_name] = artist_plays.get(artist_name, 0) + 1
-        artist_dates[artist_name] = scrobble_timestamp
+        artist_dates[artist_name] = scrobble_scrobble_date
 
     canonical_names: dict[str, str] = {}
     artist_purchase_prices: dict[str, int] = {}
     artist_today_prices: dict[str, int] = {}
     scrobbles_to_insert = []
-    snapshots_to_upsert = []
 
     unique_artists = list(artist_plays.keys())
-    today_snapshots = get_snapshots_bulk(unique_artists, today_str)
-    latest_snapshots = get_latest_snapshots_bulk(unique_artists)
+
+    if not unique_artists:
+        existing_rows = get_scrobbles(discord_id)
+        seen = set()
+        for row in existing_rows:
+            artist_name = row['artist_name']
+            if artist_name not in seen:
+                seen.add(artist_name)
+                unique_artists.append(artist_name)
 
     for artist_name, play_count in artist_plays.items():
-        scrobble_timestamp = artist_dates[artist_name]
-        existing = today_snapshots.get(artist_name)
-        if existing is not None:
-            listeners = existing
-            canonical_name = artist_name
-        else:
-            listeners, canonical_name = await get_artist_listener_count(artist_name)
-            snapshots_to_upsert.append((canonical_name, listeners, today_str))
-        canonical_names[artist_name] = canonical_name
-        artist_today_prices[artist_name] = listeners
+        scrobble_scrobble_date = artist_dates[artist_name]
+        canonical_name = artist_name
 
-        if use_today_price or scrobble_timestamp == today_str:
-            purchase_price = listeners
+        if use_today_price or scrobble_scrobble_date == today_str:
+            purchase_price = BASE_SHARE_VALUE
         else:
-            historical = get_closest_snapshot_bulk([canonical_name], scrobble_timestamp)
-            purchase_price = historical.get(canonical_name)
-            if purchase_price is None:
-                latest = latest_snapshots.get(canonical_name)
-                purchase_price = latest if latest is not None else listeners
+            historical = get_closest_snapshot_bulk([canonical_name], scrobble_scrobble_date)
+            purchase_price = max(historical.get(canonical_name, BASE_SHARE_VALUE), BASE_SHARE_VALUE)
         artist_purchase_prices[artist_name] = purchase_price
 
-        scrobbles_to_insert.append((discord_id, guild_id, canonical_name, purchase_price, scrobble_timestamp, play_count))
+        canonical_names[artist_name] = canonical_name
+
+        scrobbles_to_insert.append((discord_id, canonical_name, purchase_price, scrobble_scrobble_date, play_count))
 
     conn = get_db()
     try:
-        for canonical_name, today_price, ts in snapshots_to_upsert:
-            conn.execute(
-                'INSERT OR REPLACE INTO artist_popularity (artist_name, listeners, timestamp) VALUES (?, ?, ?)',
-                (canonical_name, today_price, ts)
-            )
-        for discord_id, guild_id, canonical_name, purchase_price, scrobble_timestamp, play_count in scrobbles_to_insert:
+
+        for discord_id, canonical_name, purchase_price, scrobble_scrobble_date, play_count in scrobbles_to_insert:
             conn.execute(
                 '''INSERT OR REPLACE INTO scrobbles
-                   (guild_id, discord_id, artist_name, purchase_price, scrobble_date, count)
-                   VALUES (?, ?, ?, ?, ?, COALESCE(
-                       (SELECT count FROM scrobbles WHERE guild_id = ? AND discord_id = ? AND artist_name = ? AND scrobble_date = ?),
-                       0
-                   ) + ?)''',
-                (guild_id, discord_id, canonical_name, purchase_price, scrobble_timestamp,
-                 guild_id, discord_id, canonical_name, scrobble_timestamp, play_count)
+                   (discord_id, artist_name, purchase_price, scrobble_date, count)
+                   VALUES (?, ?, ?, ?, ?)''',
+                (discord_id, canonical_name, purchase_price, scrobble_scrobble_date, play_count)
             )
         conn.commit()
     finally:
         conn.close()
 
-    total_money = 0.0
-    total_gain_percent = 0.0
-    total_shares = 0
-    for artist_name, play_count in artist_plays.items():
-        canonical_name = canonical_names[artist_name]
-        current_price = artist_today_prices[artist_name]
-        purchase_price = artist_purchase_prices[artist_name]
+    for artist_name in unique_artists:
+        canonical_name = canonical_names.get(artist_name, artist_name)
+        effective_price = calculate_volatility_price(canonical_name, today_str)
+        artist_today_prices[artist_name] = effective_price
+        upsert_snapshot(canonical_name, effective_price, today_str)
 
-        if purchase_price <= 0:
-            share_value = BASE_SHARE_VALUE * play_count
-            gain_percent = 0.0
-        else:
-            share_value = BASE_SHARE_VALUE * (current_price / purchase_price) * play_count
-            gain_percent = (current_price / purchase_price - 1) * 100
-        total_money += share_value
-        total_gain_percent += gain_percent * play_count
-        total_shares += play_count
-
-    avg_gain_loss_percent = (total_gain_percent / total_shares) if total_shares > 0 else 0.0
+    total_value, avg_gain_loss_percent = calculate_portfolio_value(discord_id, today_str)
     multiplier = get_claim_multiplier(discord_id)
-    total_money *= multiplier
-    update_user_money_and_claim(discord_id, total_money, unix_timestamp)
+    total_money = total_value * multiplier
+    update_user_money_and_claim(discord_id, total_money, unix_scrobble_date)
 
     return total_money, avg_gain_loss_percent
 
@@ -380,7 +402,7 @@ def get_portfolio_breakdown(discord_id: int, today_str: str) -> list[dict]:
                 'total_purchase': 0,
             }
         artist_data[artist_name]['shares'] += count
-        artist_data[artist_name]['total_purchase'] += row['purchase_price'] * count
+        artist_data[artist_name]['total_purchase'] += max(row['purchase_price'], BASE_SHARE_VALUE) * count
 
     artist_names = list(artist_data.keys())
     today_prices = get_snapshots_bulk(artist_names, today_str)
@@ -424,11 +446,11 @@ def get_artist_price_history(artist_name: str, days: int = 30) -> list[dict]:
         today = datetime.datetime.now(datetime.timezone.utc).date()
         cutoff = (today - datetime.timedelta(days=days)).isoformat().replace('-', '')
         rows = conn.execute(
-            '''SELECT artist_name, listeners, timestamp
-               FROM artist_popularity
+            '''SELECT artist_name, daily_total, scrobble_date
+               FROM artist_scrobbles
                WHERE artist_name = ? COLLATE NOCASE
-               AND timestamp >= ?
-               ORDER BY timestamp DESC''',
+               AND scrobble_date >= ?
+               ORDER BY scrobble_date DESC''',
             (artist_name, cutoff)
         ).fetchall()
     finally:
@@ -437,20 +459,20 @@ def get_artist_price_history(artist_name: str, days: int = 30) -> list[dict]:
     seen_dates = set()
     daily = []
     for row in rows:
-        ts = row['timestamp']
+        ts = row['scrobble_date']
         if ts in seen_dates:
             continue
         seen_dates.add(ts)
-        daily.append({'date': ts, 'listeners': row['listeners'], 'artist_name': row['artist_name']})
+        daily.append({'date': ts, 'daily_total': row['daily_total'], 'artist_name': row['artist_name']})
 
     daily.reverse()
 
     filtered = []
-    prev_listeners = None
+    prev_daily_total = None
     for entry in daily:
-        if prev_listeners is None or entry['listeners'] != prev_listeners:
+        if prev_daily_total is None or entry['daily_total'] != prev_daily_total:
             filtered.append(entry)
-            prev_listeners = entry['listeners']
+            prev_daily_total = entry['daily_total']
 
     return filtered
 
@@ -462,14 +484,16 @@ async def get_artist_info(artist_name: str, today_str: str) -> dict | None:
 def get_market_overview(guild_id: int = 0, days: int = 1) -> dict:
     changes = get_price_changes(days=days)
     for entry in changes:
-        past_listeners = entry.get('past_listeners', 0)
-        capped_today = entry.get('today_listeners', 0)
-        if past_listeners > 0:
-            entry['current_share_value'] = BASE_SHARE_VALUE * (capped_today / past_listeners)
+        past_daily_total = entry.get('past_daily_total', 0)
+        capped_today = entry.get('today_daily_total', 0)
+        if past_daily_total > 0:
+            entry['current_share_value'] = BASE_SHARE_VALUE * (capped_today / past_daily_total)
             entry['change_value'] = entry['current_share_value'] - BASE_SHARE_VALUE
+            entry['change_percent'] = (entry['current_share_value'] / BASE_SHARE_VALUE - 1) * 100
         else:
             entry['current_share_value'] = BASE_SHARE_VALUE
             entry['change_value'] = 0.0
+            entry['change_percent'] = 0.0
     gainers = sorted([c for c in changes if c['change_percent'] > 0], key=lambda x: x['change_percent'], reverse=True)[:5]
     losers = sorted([c for c in changes if c['change_percent'] < 0], key=lambda x: x['change_percent'])[:5]
     most_held = get_most_held_artists(limit=5, guild_id=guild_id)
@@ -493,22 +517,22 @@ def get_stock_rankings(limit: int = 10) -> dict:
 
     rankings = []
     for artist_name in artist_names:
-        current_listeners = latest_prices.get(artist_name)
-        if current_listeners is None:
+        current_daily_total = latest_prices.get(artist_name)
+        if current_daily_total is None:
             continue
 
-        base_listeners = yesterday_prices.get(artist_name)
-        if base_listeners is None:
-            base_listeners = current_listeners
+        base_daily_total = yesterday_prices.get(artist_name)
+        if base_daily_total is None:
+            base_daily_total = current_daily_total
 
-        capped_price = _cap_daily_price(base_listeners, current_listeners)
+        capped_price = _cap_daily_price(base_daily_total, current_daily_total)
         capped_price = max(capped_price, 1)
-        current_share_value = BASE_SHARE_VALUE * (capped_price / base_listeners) if base_listeners > 0 else BASE_SHARE_VALUE
+        current_share_value = BASE_SHARE_VALUE * (capped_price / base_daily_total) if base_daily_total > 0 else BASE_SHARE_VALUE
 
         rankings.append({
             'artist_name': artist_name,
             'current_share_value': current_share_value,
-            'listeners': capped_price,
+            'daily_total': capped_price,
         })
 
     rankings.sort(key=lambda x: x['current_share_value'], reverse=True)

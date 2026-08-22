@@ -7,7 +7,7 @@ import asyncio
 import discord
 from discord.ext import commands, tasks
 from config import DISCORD_TOKEN
-from services.database import init_db, get_all_guild_configs
+from services.database import init_db, get_all_guild_configs, migrate_fix_zero_purchase_prices
 from services.portfolio import get_market_overview
 from cogs.commands import setup as commands_setup
 from backup_db import run_backup
@@ -28,7 +28,7 @@ _last_sync_ts = 0
 _guild_config_cache: list[dict] = []
 _guild_config_cache_ts = 0
 GUILD_CONFIG_CACHE_TTL = 300
-_db_initialized = False
+_migration_ran = False
 
 
 def invalidate_guild_config_cache():
@@ -39,6 +39,14 @@ def invalidate_guild_config_cache():
 @bot.event
 async def on_ready():
     init_db()
+    global _migration_ran
+    if not _migration_ran:
+        try:
+            migrate_fix_zero_purchase_prices()
+            _migration_ran = True
+            logger.info('Migrated zero/NULL purchase_price rows to BASE_SHARE_VALUE')
+        except Exception as e:
+            logger.error('Failed to migrate purchase prices: %s', e)
     global _last_sync_ts, _guild_config_cache, _guild_config_cache_ts
     now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
     if now_ts - _last_sync_ts >= 3600:

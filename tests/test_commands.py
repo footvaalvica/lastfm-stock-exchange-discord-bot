@@ -1,6 +1,7 @@
 import os
 import sys
 import datetime
+import asyncio
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
@@ -11,21 +12,21 @@ os.environ.setdefault('DISCORD_TOKEN', 'test')
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cogs.commands import (
-    StockCommands, check_lastfm_cooldown, format_listeners,
+    StockCommands, check_lastfm_cooldown, format_daily_total,
     get_user_in_guild, _lastfm_cooldowns, ConfirmUnlinkView,
     add_user_to_guild
 )
 from services.database import (
     get_db, init_db, get_user, insert_user, get_scrobbles,
     insert_scrobble, update_user_money_and_claim,
-    get_closest_snapshot, get_snapshot, upsert_snapshot, update_last_preview,
-    update_user_money, get_price_changes, get_most_held_artists, get_transactions,
-    get_daily_scrobble_counts, _cap_daily_price, get_all_guild_configs
+    upsert_snapshot, update_last_preview,
+    update_user_money, get_transactions,
+    get_all_guild_configs
 )
 from services.portfolio import (
     calculate_portfolio_value, get_portfolio_breakdown, get_artist_info,
     get_artist_price_history, get_market_overview, get_claim_multiplier,
-    get_balance_stats, BASE_SHARE_VALUE
+    get_balance_stats, BASE_SHARE_VALUE, process_user_claim
 )
 
 GUILD_ID = 1
@@ -97,17 +98,17 @@ class TestCheckLastfmCooldown:
         assert remaining == 0
 
 
-class TestFormatListeners:
+class TestFormatDailyTotal:
     def test_small_numbers(self):
-        assert format_listeners(999) == "999"
+        assert format_daily_total(999) == "999"
 
     def test_thousands(self):
-        assert format_listeners(1000) == "1.0k"
-        assert format_listeners(25300) == "25.3k"
+        assert format_daily_total(1000) == "1.0k"
+        assert format_daily_total(25300) == "25.3k"
 
     def test_millions(self):
-        assert format_listeners(1200000) == "1.2M"
-        assert format_listeners(4500000) == "4.5M"
+        assert format_daily_total(1200000) == "1.2M"
+        assert format_daily_total(4500000) == "4.5M"
 
 
 class TestGetUserInGuild:
@@ -116,7 +117,7 @@ class TestGetUserInGuild:
         assert row is None
 
     def test_returns_user_and_adds_guild(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
         row = get_user_in_guild(123456789, GUILD_ID)
         assert row is not None
         assert row["username"] == "alice"
@@ -170,7 +171,7 @@ class TestSlashClaim:
         assert "set up your account" in interaction.response.send_message.call_args[0][0]
 
     def test_24h_cooldown_blocks_claim(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm", money=0, last_claim=9999999999)
+        insert_user(123456789, "alice", "alice_lfm", money=0, last_claim=9999999999, guild_id=GUILD_ID)
         cmd = StockCommands(MagicMock())
         interaction = make_interaction()
 
@@ -185,7 +186,7 @@ class TestSlashClaim:
         assert "24 hours" in interaction.response.send_message.call_args[0][0]
 
     def test_lastfm_cooldown_blocks_before_claim(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm", money=0, last_claim=0)
+        insert_user(123456789, "alice", "alice_lfm", money=0, last_claim=0, guild_id=GUILD_ID)
         cmd = StockCommands(MagicMock())
         interaction = make_interaction()
 
@@ -202,9 +203,131 @@ class TestSlashClaim:
         assert "wait" in interaction.response.send_message.call_args[0][0].lower()
 
 
-class TestSlashCheck:
+def _make_scrobble(artist_name, count, date_str, base_ts=None):
+    base_ts = base_ts or int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    date = datetime.datetime.strptime(date_str, '%Y%m%d').replace(tzinfo=datetime.timezone.utc)
+    ts = int(date.timestamp())
+    scrobble = MagicMock()
+    scrobble.track.artist.name = artist_name
+    scrobble.timestamp = ts
+    return scrobble
+
+
+def _make_scrobbles(artist_name, count, date_str):
+    return [_make_scrobble(artist_name, count, date_str) for _ in range(count)]
+
+
+class TestSlashClaimMarketFluctuation:
+    def test_claim_different_artists_produce_different_prices(self, tmp_db):
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
+        today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+        yesterday = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)).isoformat().replace('-', '')
+
+        upsert_snapshot("Heavy Artist", 10000, yesterday)
+        upsert_snapshot("Medium Artist", 5000, yesterday)
+        upsert_snapshot("Light Artist", 1000, yesterday)
+
+        for artist, count, date in [
+            ("Heavy Artist", 100, yesterday),
+            ("Medium Artist", 50, yesterday),
+            ("Light Artist", 10, yesterday),
+        ]:
+            insert_scrobble(123456789, artist, 10, date, count=count)
+
+        mock_user = MagicMock()
+        scrobbles = (
+            _make_scrobbles("Heavy Artist", 100, today) +
+            _make_scrobbles("Medium Artist", 50, today) +
+            _make_scrobbles("Light Artist", 10, today)
+        )
+
+        async def run():
+            with patch('services.portfolio.fetch_recent_tracks', new_callable=AsyncMock, return_value=scrobbles):
+                return await process_user_claim(mock_user, 123456789, GUILD_ID)
+
+        total_money, gain_loss = asyncio.run(run())
+
+        snapshots = {}
+        for artist in ["Heavy Artist", "Medium Artist", "Light Artist"]:
+            from services.database import get_snapshot
+            snap = get_snapshot(artist, today)
+            assert snap is not None, f"Missing snapshot for {artist}"
+            snapshots[artist] = snap['daily_total']
+
+        assert snapshots["Heavy Artist"] > snapshots["Medium Artist"] > snapshots["Light Artist"], (
+            f"Prices should reflect scrobble counts: {snapshots}"
+        )
+        assert snapshots["Light Artist"] >= 1
+
+    def test_claim_same_artist_twice_does_not_duplicate_count(self, tmp_db):
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
+        today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+
+        mock_user = MagicMock()
+        scrobbles = _make_scrobbles("Same Artist", 5, today)
+
+        async def run_claim():
+            with patch('services.portfolio.fetch_recent_tracks', new_callable=AsyncMock, return_value=scrobbles):
+                await process_user_claim(mock_user, 123456789, GUILD_ID)
+
+        asyncio.run(run_claim())
+        asyncio.run(run_claim())
+
+        from services.database import get_scrobbles
+        rows = get_scrobbles(123456789)
+        same_artist = next(r for r in rows if r['artist_name'] == 'Same Artist')
+        assert same_artist['count'] == 5
+
+    def test_claim_portfolio_value_reflects_scrobble_counts(self, tmp_db):
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
+        today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+
+        mock_user = MagicMock()
+        scrobbles = (
+            _make_scrobbles("High Count", 20, today) +
+            _make_scrobbles("Low Count", 1, today)
+        )
+
+        async def run():
+            with patch('services.portfolio.fetch_recent_tracks', new_callable=AsyncMock, return_value=scrobbles):
+                return await process_user_claim(mock_user, 123456789, GUILD_ID)
+
+        total_money, gain_loss = asyncio.run(run())
+
+        breakdown = get_portfolio_breakdown(123456789, today)
+        high_entry = next(b for b in breakdown if b['artist_name'] == 'High Count')
+        low_entry = next(b for b in breakdown if b['artist_name'] == 'Low Count')
+        assert high_entry['current_value'] > low_entry['current_value']
+        assert total_money > 0
+
+    def test_claim_high_count_artist_worth_more_than_low_count(self, tmp_db):
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
+        today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
+
+        mock_user_high = MagicMock()
+        scrobbles_high = _make_scrobbles("Popular Artist", 50, today)
+
+        async def claim_high():
+            with patch('services.portfolio.fetch_recent_tracks', new_callable=AsyncMock, return_value=scrobbles_high):
+                return await process_user_claim(mock_user_high, 123456789, GUILD_ID)
+
+        high_money, _ = asyncio.run(claim_high())
+
+        insert_user(999999999, "bob", "bob_lfm", guild_id=GUILD_ID)
+        mock_user_low = MagicMock()
+        scrobbles_low = _make_scrobbles("Obscure Artist", 1, today)
+
+        async def claim_low():
+            with patch('services.portfolio.fetch_recent_tracks', new_callable=AsyncMock, return_value=scrobbles_low):
+                return await process_user_claim(mock_user_low, 999999999, GUILD_ID)
+
+        low_money, _ = asyncio.run(claim_low())
+
+        assert high_money > low_money, (
+            f"High scrobble count should yield higher portfolio value: {high_money} vs {low_money}"
+        )
     def test_non_admin_cooldown_blocks_check(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
         update_last_preview(123456789, 9999999999)
         cmd = StockCommands(MagicMock())
         interaction = make_interaction(is_admin=False)
@@ -220,7 +343,7 @@ class TestSlashCheck:
         assert "1 hour" in interaction.response.send_message.call_args[0][0]
 
     def test_admin_bypasses_cooldown(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
         update_last_preview(123456789, 9999999999)
         cmd = StockCommands(MagicMock())
         interaction = make_interaction(is_admin=True)
@@ -241,7 +364,7 @@ class TestSlashCheck:
 
 class TestSlashBalance:
     def test_empty_portfolio_returns_na(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
         cmd = StockCommands(MagicMock())
         interaction = make_interaction()
 
@@ -256,8 +379,8 @@ class TestSlashBalance:
         assert embed is not None
 
     def test_with_scrobbles_returns_stats(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
-        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, "20260722")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
+        insert_scrobble(123456789, "Taylor Swift", 15000000, "20260722")
         cmd = StockCommands(MagicMock())
         interaction = make_interaction()
 
@@ -274,7 +397,7 @@ class TestSlashBalance:
 
 class TestSlashPortfolio:
     def test_empty_portfolio_message(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
         cmd = StockCommands(MagicMock())
         interaction = make_interaction()
 
@@ -289,8 +412,8 @@ class TestSlashPortfolio:
         assert "no shares" in interaction.followup.send.call_args[0][0].lower()
 
     def test_with_shows_breakdown(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
-        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, "20260722")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
+        insert_scrobble(123456789, "Taylor Swift", 15000000, "20260722")
         upsert_snapshot("Taylor Swift", 15200000, "20260722")
         cmd = StockCommands(MagicMock())
         interaction = make_interaction()
@@ -387,7 +510,7 @@ class TestSlashHistory:
 
 class TestSlashTransactions:
     def test_no_transactions_message(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
         cmd = StockCommands(MagicMock())
         interaction = make_interaction()
 
@@ -402,8 +525,8 @@ class TestSlashTransactions:
         assert "No transactions" in interaction.response.send_message.call_args[0][0]
 
     def test_with_transactions_shows_view(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
-        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, "20260722")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
+        insert_scrobble(123456789, "Taylor Swift", 15000000, "20260722")
         cmd = StockCommands(MagicMock())
         interaction = make_interaction()
 
@@ -549,7 +672,7 @@ class TestSlashMarket:
             asyncio.run(run())
 
             embed = interaction.followup.send.call_args[1]["embed"]
-            assert "Most Held" not in embed.description
+            assert "Most Held" in embed.description
 
     def test_alltime_period_excludes_most_held(self, tmp_db):
         cmd = StockCommands(MagicMock())
@@ -569,7 +692,7 @@ class TestSlashMarket:
             asyncio.run(run())
 
             embed = interaction.followup.send.call_args[1]["embed"]
-            assert "Most Held" not in embed.description
+            assert "Most Held" in embed.description
 
 
 class TestSlashStocks:
@@ -632,8 +755,8 @@ class TestSlashLeaderboard:
         assert "No users" in embed.description
 
     def test_with_users_sorted_by_money(self, tmp_db):
-        insert_user(111, GUILD_ID, "alice", "alice_lfm", money=100.0)
-        insert_user(222, GUILD_ID, "bob", "bob_lfm", money=300.0)
+        insert_user(111, "alice", "alice_lfm", money=100.0, guild_id=GUILD_ID)
+        insert_user(222, "bob", "bob_lfm", money=300.0, guild_id=GUILD_ID)
         add_user_to_guild(111, GUILD_ID)
         add_user_to_guild(222, GUILD_ID)
         cmd = StockCommands(MagicMock())
@@ -668,8 +791,8 @@ class TestSlashUnlink:
         assert "don't have an account" in interaction.response.send_message.call_args[0][0]
 
     def test_shows_confirmation_view(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
-        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, "20260722")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
+        insert_scrobble(123456789, "Taylor Swift", 15000000, "20260722")
         cmd = StockCommands(MagicMock())
         interaction = make_interaction()
 
@@ -686,8 +809,8 @@ class TestSlashUnlink:
         assert isinstance(view, ConfirmUnlinkView)
 
     def test_confirm_deletes_user_data(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
-        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, "20260722")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
+        insert_scrobble(123456789, "Taylor Swift", 15000000, "20260722")
         view = ConfirmUnlinkView(123456789)
         interaction = make_interaction()
 
@@ -745,9 +868,9 @@ class TestSlashMarketconfig:
 
 class TestClaimMultiplierNoBonusOnFirstDay:
     def test_first_day_scrobbles_do_not_trigger_bonus(self, tmp_db):
-        insert_user(123456789, GUILD_ID, "alice", "alice_lfm")
+        insert_user(123456789, "alice", "alice_lfm", guild_id=GUILD_ID)
         today = datetime.datetime.now(datetime.timezone.utc).date().isoformat().replace('-', '')
-        insert_scrobble(123456789, GUILD_ID, "Taylor Swift", 15000000, today, count=100)
+        insert_scrobble(123456789, "Taylor Swift", 15000000, today, count=100)
 
         multiplier = get_claim_multiplier(123456789)
         assert multiplier == 1.0

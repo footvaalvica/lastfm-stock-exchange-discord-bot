@@ -3,7 +3,7 @@ import datetime
 from config import DB_PATH
 
 MAX_DAILY_CHANGE = 0.5
-VOLATILITY_MULTIPLIER = 3
+VOLATILITY_MULTIPLIER = 1
 
 
 def _cap_daily_price(base_price: int, current_price: int, volatility_multiplier: float = VOLATILITY_MULTIPLIER) -> int:
@@ -39,7 +39,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             discord_id INTEGER NOT NULL UNIQUE,
-            guild_id INTEGER NOT NULL DEFAULT 0,
             username TEXT NOT NULL,
             lastfm_username TEXT NOT NULL,
             money REAL DEFAULT 0,
@@ -51,23 +50,22 @@ def init_db():
     conn.execute('''
         CREATE TABLE IF NOT EXISTS scrobbles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL DEFAULT 0,
             discord_id INTEGER NOT NULL,
             artist_name TEXT NOT NULL,
-            purchase_price INTEGER,
+            purchase_price INTEGER DEFAULT 10,
             scrobble_date TEXT NOT NULL,
             count INTEGER NOT NULL DEFAULT 1,
             FOREIGN KEY (discord_id) REFERENCES users(discord_id),
-            UNIQUE(guild_id, discord_id, artist_name, scrobble_date)
+            UNIQUE(discord_id, artist_name, scrobble_date)
         )
     ''')
 
     conn.execute('''
-        CREATE TABLE IF NOT EXISTS artist_popularity (
+        CREATE TABLE IF NOT EXISTS artist_scrobbles (
             artist_name TEXT NOT NULL,
-            listeners INTEGER NOT NULL,
-            timestamp TEXT NOT NULL,
-            PRIMARY KEY (artist_name, timestamp)
+            daily_total INTEGER NOT NULL,
+            scrobble_date TEXT NOT NULL,
+            PRIMARY KEY (artist_name, scrobble_date)
         )
     ''')
 
@@ -88,13 +86,10 @@ def init_db():
         )
     ''')
 
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_scrobbles_guild ON scrobbles(guild_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_scrobbles_discord_id ON scrobbles(discord_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_scrobbles_artist ON scrobbles(artist_name)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_artist_popularity_artist ON artist_popularity(artist_name)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_artist_popularity_artist_ts ON artist_popularity(artist_name, timestamp)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_artist_scrobbles_artist_date ON artist_scrobbles(artist_name, scrobble_date)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guilds_discord_id ON user_guilds(discord_id)')
-    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_id ON users(discord_id)')
 
     conn.commit()
     conn.close()
@@ -114,21 +109,22 @@ def get_user(discord_id: int):
         conn.close()
 
 
-def insert_user(discord_id: int, guild_id: int, username: str, lastfm_username: str, money: float = 0, last_claim: int = 0):
+def insert_user(discord_id: int, username: str, lastfm_username: str, money: float = 0, last_claim: int = 0, guild_id: int = 0):
     conn = get_db()
     try:
         conn.execute(
-            '''INSERT INTO users (discord_id, guild_id, username, lastfm_username, money, last_claim, last_preview)
-               VALUES (?, ?, ?, ?, ?, ?, 0)
+            '''INSERT INTO users (discord_id, username, lastfm_username, money, last_claim, last_preview)
+               VALUES (?, ?, ?, ?, ?, 0)
                ON CONFLICT(discord_id) DO UPDATE SET
                    username = excluded.username,
                    lastfm_username = excluded.lastfm_username''',
-            (discord_id, guild_id, username, lastfm_username, money, last_claim)
+            (discord_id, username, lastfm_username, money, last_claim)
         )
-        conn.execute(
-            'INSERT OR IGNORE INTO user_guilds (discord_id, guild_id) VALUES (?, ?)',
-            (discord_id, guild_id)
-        )
+        if guild_id:
+            conn.execute(
+                'INSERT OR IGNORE INTO user_guilds (discord_id, guild_id) VALUES (?, ?)',
+                (discord_id, guild_id)
+            )
         conn.commit()
     finally:
         conn.close()
@@ -146,12 +142,12 @@ def add_user_to_guild(discord_id: int, guild_id: int):
         conn.close()
 
 
-def update_last_preview(discord_id: int, timestamp: int):
+def update_last_preview(discord_id: int, scrobble_date: int):
     conn = get_db()
     try:
         conn.execute(
             'UPDATE users SET last_preview = ? WHERE discord_id = ?',
-            (timestamp, discord_id)
+            (scrobble_date, discord_id)
         )
         conn.commit()
     finally:
@@ -196,18 +192,18 @@ def get_transactions(discord_id: int, artist_name: str | None = None, limit: int
         conn.close()
 
 
-def insert_scrobble(discord_id: int, guild_id: int, artist_name: str, purchase_price: int, scrobble_date: str, count: int = 1):
+def insert_scrobble(discord_id: int, artist_name: str, purchase_price: int, scrobble_date: str, count: int = 1):
     conn = get_db()
     try:
         conn.execute(
             '''INSERT OR REPLACE INTO scrobbles
-               (guild_id, discord_id, artist_name, purchase_price, scrobble_date, count)
-               VALUES (?, ?, ?, ?, ?, COALESCE(
-                   (SELECT count FROM scrobbles WHERE guild_id = ? AND discord_id = ? AND artist_name = ? AND scrobble_date = ?),
+               (discord_id, artist_name, purchase_price, scrobble_date, count)
+               VALUES (?, ?, ?, ?, COALESCE(
+                   (SELECT count FROM scrobbles WHERE discord_id = ? AND artist_name = ? AND scrobble_date = ?),
                    0
                ) + ?)''',
-            (guild_id, discord_id, artist_name, purchase_price, scrobble_date,
-             guild_id, discord_id, artist_name, scrobble_date, count)
+            (discord_id, artist_name, purchase_price, scrobble_date,
+             discord_id, artist_name, scrobble_date, count)
         )
         conn.commit()
     finally:
@@ -243,20 +239,20 @@ def get_closest_snapshot(artist_name: str, target_date_str: str):
     conn = get_db()
     try:
         before = conn.execute(
-            '''SELECT listeners, timestamp
-               FROM artist_popularity
+            '''SELECT daily_total, scrobble_date
+               FROM artist_scrobbles
                WHERE artist_name = ? COLLATE NOCASE
-               AND timestamp <= ?
-               ORDER BY timestamp DESC
+               AND scrobble_date <= ?
+               ORDER BY scrobble_date DESC
                LIMIT 1''',
             (artist_name, target_date_str)
         ).fetchone()
         after = conn.execute(
-            '''SELECT listeners, timestamp
-               FROM artist_popularity
+            '''SELECT daily_total, scrobble_date
+               FROM artist_scrobbles
                WHERE artist_name = ? COLLATE NOCASE
-               AND timestamp >= ?
-               ORDER BY timestamp ASC
+               AND scrobble_date >= ?
+               ORDER BY scrobble_date ASC
                LIMIT 1''',
             (artist_name, target_date_str)
         ).fetchone()
@@ -265,9 +261,9 @@ def get_closest_snapshot(artist_name: str, target_date_str: str):
 
     candidates = []
     if before:
-        candidates.append((abs(int(before['timestamp']) - target_ts), before['listeners']))
+        candidates.append((abs(int(before['scrobble_date']) - target_ts), before['daily_total']))
     if after:
-        candidates.append((abs(int(after['timestamp']) - target_ts), after['listeners']))
+        candidates.append((abs(int(after['scrobble_date']) - target_ts), after['daily_total']))
     if not candidates:
         return None
     candidates.sort(key=lambda x: x[0])
@@ -282,19 +278,19 @@ def get_closest_snapshot_bulk(artist_names: list[str], target_date_str: str) -> 
     try:
         placeholders = ','.join('?' for _ in artist_names)
         before_rows = conn.execute(
-            f'''SELECT artist_name, listeners, timestamp
-                FROM artist_popularity
+            f'''SELECT artist_name, daily_total, scrobble_date
+                FROM artist_scrobbles
                 WHERE artist_name IN ({placeholders}) COLLATE NOCASE
-                AND timestamp <= ?
-                ORDER BY timestamp DESC''',
+                AND scrobble_date <= ?
+                ORDER BY scrobble_date DESC''',
             artist_names + [target_date_str]
         ).fetchall()
         after_rows = conn.execute(
-            f'''SELECT artist_name, listeners, timestamp
-                FROM artist_popularity
+            f'''SELECT artist_name, daily_total, scrobble_date
+                FROM artist_scrobbles
                 WHERE artist_name IN ({placeholders}) COLLATE NOCASE
-                AND timestamp >= ?
-                ORDER BY timestamp ASC''',
+                AND scrobble_date >= ?
+                ORDER BY scrobble_date ASC''',
             artist_names + [target_date_str]
         ).fetchall()
     finally:
@@ -303,35 +299,23 @@ def get_closest_snapshot_bulk(artist_names: list[str], target_date_str: str) -> 
     best: dict[str, tuple[int, int]] = {}
     for row in before_rows:
         name = row['artist_name']
-        dist = abs(int(row['timestamp']) - target_ts)
+        dist = abs(int(row['scrobble_date']) - target_ts)
         if name not in best or dist < best[name][0]:
-            best[name] = (dist, row['listeners'])
+            best[name] = (dist, row['daily_total'])
     for row in after_rows:
         name = row['artist_name']
-        dist = abs(int(row['timestamp']) - target_ts)
+        dist = abs(int(row['scrobble_date']) - target_ts)
         if name not in best or dist < best[name][0]:
-            best[name] = (dist, row['listeners'])
-    return {name: listeners for name, (_, listeners) in best.items()}
+            best[name] = (dist, row['daily_total'])
+    return {name: daily_total for name, (_, daily_total) in best.items()}
 
 
 def get_snapshot(artist_name: str, date_str: str):
     conn = get_db()
     try:
         row = conn.execute(
-            'SELECT artist_name, listeners FROM artist_popularity WHERE artist_name = ? COLLATE NOCASE AND timestamp = ?',
+            'SELECT artist_name, daily_total FROM artist_scrobbles WHERE artist_name = ? COLLATE NOCASE AND scrobble_date = ?',
             (artist_name, date_str)
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
-
-
-def get_latest_snapshot(artist_name: str):
-    conn = get_db()
-    try:
-        row = conn.execute(
-            'SELECT artist_name, listeners, timestamp FROM artist_popularity WHERE artist_name = ? COLLATE NOCASE ORDER BY timestamp DESC LIMIT 1',
-            (artist_name,)
         ).fetchone()
         return dict(row) if row else None
     finally:
@@ -345,10 +329,10 @@ def get_snapshots_bulk(artist_names: list[str], date_str: str) -> dict[str, int]
     try:
         placeholders = ','.join('?' for _ in artist_names)
         rows = conn.execute(
-            f'SELECT artist_name, listeners FROM artist_popularity WHERE artist_name IN ({placeholders}) COLLATE NOCASE AND timestamp = ?',
+            f'SELECT artist_name, daily_total FROM artist_scrobbles WHERE artist_name IN ({placeholders}) COLLATE NOCASE AND scrobble_date = ?',
             artist_names + [date_str]
         ).fetchall()
-        return {row['artist_name']: row['listeners'] for row in rows}
+        return {row['artist_name']: row['daily_total'] for row in rows}
     finally:
         conn.close()
 
@@ -360,33 +344,33 @@ def get_latest_snapshots_bulk(artist_names: list[str]) -> dict[str, int]:
     try:
         placeholders = ','.join('?' for _ in artist_names)
         rows = conn.execute(
-            f'''SELECT artist_name, listeners
-                FROM artist_popularity
+            f'''SELECT artist_name, daily_total
+                FROM artist_scrobbles
                 WHERE artist_name IN ({placeholders}) COLLATE NOCASE
-                ORDER BY timestamp DESC''',
+                ORDER BY scrobble_date DESC''',
             artist_names
         ).fetchall()
         latest = {}
         for row in rows:
             name = row['artist_name']
             if name not in latest:
-                latest[name] = row['listeners']
+                latest[name] = row['daily_total']
         return latest
     finally:
         conn.close()
 
 
-def upsert_snapshot(artist_name: str, listeners: int, timestamp: str):
+def upsert_snapshot(artist_name: str, daily_total: int, scrobble_date: str):
     conn = get_db()
     try:
         existing = conn.execute(
-            'SELECT artist_name FROM artist_popularity WHERE LOWER(artist_name) = LOWER(?)',
+            'SELECT artist_name FROM artist_scrobbles WHERE LOWER(artist_name) = LOWER(?)',
             (artist_name,)
         ).fetchone()
         canonical_name = existing['artist_name'] if existing else artist_name
         conn.execute(
-            'INSERT OR REPLACE INTO artist_popularity (artist_name, listeners, timestamp) VALUES (?, ?, ?)',
-            (canonical_name, listeners, timestamp)
+            'INSERT OR REPLACE INTO artist_scrobbles (artist_name, daily_total, scrobble_date) VALUES (?, ?, ?)',
+            (canonical_name, daily_total, scrobble_date)
         )
         conn.commit()
     finally:
@@ -405,6 +389,30 @@ def get_total_scrobbles_for_artist(artist_name: str) -> int:
         conn.close()
 
 
+
+def get_artist_scrobble_history(artist_name: str, days: int = 7) -> list[tuple[str, int]]:
+    conn = get_db()
+    try:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        cutoff_date = now_utc.date() - datetime.timedelta(days=days)
+        cutoff = cutoff_date.isoformat().replace('-', '')
+        today_str = now_utc.date().isoformat().replace('-', '')
+        rows = conn.execute(
+            "SELECT scrobble_date, SUM(count) as total FROM scrobbles WHERE artist_name = ? COLLATE NOCASE AND scrobble_date >= ? AND scrobble_date < ? GROUP BY scrobble_date ORDER BY scrobble_date ASC",
+            (artist_name, cutoff, today_str)
+        ).fetchall()
+        result = [(row['scrobble_date'], row['total']) for row in rows]
+        dates_in_result = {d for d, _ in result}
+        for i in range(days):
+            d = (cutoff_date + datetime.timedelta(days=i)).isoformat().replace('-', '')
+            if d not in dates_in_result:
+                result.append((d, 0))
+        result.sort(key=lambda x: x[0])
+        return result
+    finally:
+        conn.close()
+
+
 def get_price_changes(days: int | str = 1) -> list[dict]:
     conn = get_db()
     try:
@@ -412,52 +420,52 @@ def get_price_changes(days: int | str = 1) -> list[dict]:
         today = now_utc.date().isoformat().replace('-', '')
 
         today_rows = conn.execute(
-            'SELECT artist_name, listeners FROM artist_popularity WHERE timestamp = ?',
+            'SELECT artist_name, daily_total FROM artist_scrobbles WHERE scrobble_date = ?',
             (today,)
         ).fetchall()
 
         if days == "alltime":
             past_rows = conn.execute(
-                '''SELECT artist_name, listeners FROM artist_popularity
-                   WHERE timestamp = (
-                       SELECT MIN(timestamp) FROM artist_popularity ap2
-                       WHERE ap2.artist_name = artist_popularity.artist_name COLLATE NOCASE
+                '''SELECT artist_name, daily_total FROM artist_scrobbles
+                   WHERE scrobble_date = (
+                       SELECT MIN(scrobble_date) FROM artist_scrobbles ap2
+                       WHERE ap2.artist_name = artist_scrobbles.artist_name COLLATE NOCASE
                    )'''
             ).fetchall()
         elif isinstance(days, int) and days > 1:
             cutoff = (now_utc.date() - datetime.timedelta(days=days)).isoformat().replace('-', '')
             past_rows = conn.execute(
-                '''SELECT artist_name, MIN(timestamp) as timestamp, listeners
-                   FROM artist_popularity
-                   WHERE timestamp >= ? AND timestamp < ?
+                '''SELECT artist_name, MIN(scrobble_date) as scrobble_date, daily_total
+                   FROM artist_scrobbles
+                   WHERE scrobble_date >= ? AND scrobble_date < ?
                    GROUP BY artist_name COLLATE NOCASE''',
                 (cutoff, today)
             ).fetchall()
         else:
             past = (now_utc.date() - datetime.timedelta(days=days)).isoformat().replace('-', '')
             past_rows = conn.execute(
-                'SELECT artist_name, listeners FROM artist_popularity WHERE timestamp = ?',
+                'SELECT artist_name, daily_total FROM artist_scrobbles WHERE scrobble_date = ?',
                 (past,)
             ).fetchall()
     finally:
         conn.close()
 
-    past_by_name = {row['artist_name']: row['listeners'] for row in past_rows}
+    past_by_name = {row['artist_name']: row['daily_total'] for row in past_rows}
     result = []
     for row in today_rows:
         artist_name = row['artist_name']
-        today_listeners = row['listeners']
-        past_listeners = past_by_name.get(artist_name)
-        if past_listeners is None:
+        today_daily_total = row['daily_total']
+        past_daily_total = past_by_name.get(artist_name)
+        if past_daily_total is None:
             continue
-        capped_today = _cap_daily_price(past_listeners, today_listeners)
+        capped_today = _cap_daily_price(past_daily_total, today_daily_total)
         capped_today = max(capped_today, 1)
-        change = capped_today - past_listeners
-        change_percent = (change / past_listeners * 100) if past_listeners > 0 else 0.0
+        change = capped_today - past_daily_total
+        change_percent = (change / past_daily_total * 100) if past_daily_total > 0 else 0.0
         result.append({
             'artist_name': artist_name,
-            'today_listeners': capped_today,
-            'past_listeners': past_listeners,
+            'today_daily_total': capped_today,
+            'past_daily_total': past_daily_total,
             'change': change,
             'change_percent': change_percent,
         })
@@ -478,10 +486,11 @@ def get_most_held_artists(limit: int = 5, guild_id: int = 0) -> list[dict]:
             ).fetchall()
         else:
             rows = conn.execute(
-                '''SELECT artist_name, SUM(count) as count
-                   FROM scrobbles
-                   WHERE guild_id = ?
-                   GROUP BY artist_name COLLATE NOCASE
+                '''SELECT s.artist_name, SUM(s.count) as count
+                   FROM scrobbles s
+                   JOIN user_guilds ug ON s.discord_id = ug.discord_id
+                   WHERE ug.guild_id = ?
+                   GROUP BY s.artist_name COLLATE NOCASE
                    ORDER BY count DESC
                    LIMIT ?''',
                 (guild_id, limit)
@@ -534,8 +543,20 @@ def get_all_artists() -> list[str]:
     conn = get_db()
     try:
         rows = conn.execute(
-            'SELECT DISTINCT artist_name FROM artist_popularity ORDER BY artist_name COLLATE NOCASE'
+            'SELECT DISTINCT artist_name FROM artist_scrobbles ORDER BY artist_name COLLATE NOCASE'
         ).fetchall()
         return [row['artist_name'] for row in rows]
+    finally:
+        conn.close()
+
+
+def migrate_fix_zero_purchase_prices(base_value: int = 10):
+    conn = get_db()
+    try:
+        conn.execute(
+            '''UPDATE scrobbles SET purchase_price = ? WHERE purchase_price IS NULL OR purchase_price <= 0''',
+            (base_value,)
+        )
+        conn.commit()
     finally:
         conn.close()

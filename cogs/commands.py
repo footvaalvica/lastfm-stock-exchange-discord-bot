@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 from services.database import get_user, insert_user, update_last_preview, update_user_money, set_guild_config, get_transactions, add_user_to_guild
 from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview, get_balance_stats, get_claim_multiplier, LastFMPrivacyError, get_stock_rankings
-from services.lastfm import validate_lastfm_user, get_lastfm_user
+from services.lastfm import validate_lastfm_user
 
 logger = logging.getLogger('lastfm_bot')
 
@@ -43,7 +43,7 @@ def check_lastfm_cooldown(user_id: int) -> tuple[bool, int]:
     return True, 0
 
 
-def format_listeners(count: int) -> str:
+def format_daily_total(count: int) -> str:
     if count >= 1_000_000:
         return f"{count / 1_000_000:.1f}M"
     if count >= 1_000:
@@ -70,18 +70,19 @@ def generate_allocation_chart(breakdown: list[dict], total_value: float) -> str 
 
     colors = plt.cm.tab20(range(len(labels)))
 
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.pie(
+    fig, ax = plt.subplots(figsize=(10, 8))
+    wedges, _ = ax.pie(
         values,
-        labels=[f"{l}\n{p:.1f}%" for l, p in zip(labels, percentages)],
         colors=colors,
         startangle=140,
         textprops={'fontsize': 11}
     )
+    legend_labels = [f"{l} ({p:.1f}%)" for l, p in zip(labels, percentages)]
+    ax.legend(wedges, legend_labels, loc='center left', bbox_to_anchor=(1, 0, 0.5, 1), fontsize=9)
     ax.set_title("Portfolio Allocation", fontsize=16, fontweight='bold')
 
     with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-        plt.savefig(tmp.name, bbox_inches='tight', dpi=100)
+        plt.savefig(tmp.name, bbox_inches='tight', pad_inches=0.5, dpi=100)
         plt.close(fig)
         return tmp.name
 
@@ -113,39 +114,24 @@ class TransactionsView(discord.ui.View):
         lines = []
         for artist in page_artists:
             txs = self.grouped[artist]
-            if self.artist_filter:
-                lines.append(f"**{artist}**")
-                i = 0
-                while i < len(txs):
-                    tx = txs[i]
-                    date_fmt = datetime.datetime.strptime(tx['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
-                    count = 1
-                    while i + count < len(txs) and txs[i + count]['purchase_price'] == tx['purchase_price']:
-                        count += 1
-                    if count > 1:
-                        lines.append(f"  {date_fmt} x{count}")
-                    else:
-                        lines.append(f"  {date_fmt}")
-                    i += count
-            else:
-                lines.append(f"**{artist}** — ×{sum(tx['count'] for tx in txs)}")
-                i = 0
-                shown = 0
-                while i < len(txs) and shown < 3:
-                    tx = txs[i]
-                    date_fmt = datetime.datetime.strptime(tx['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
-                    count = 1
-                    while i + count < len(txs) and txs[i + count]['purchase_price'] == tx['purchase_price']:
-                        count += 1
-                    if count > 1:
-                        lines.append(f"  {date_fmt} x{count}")
-                    else:
-                        lines.append(f"  {date_fmt}")
-                    shown += count
-                    i += count
-                remaining = len(txs) - i
-                if remaining > 0:
-                    lines.append(f"  ...and {remaining} more")
+            lines.append(f"**{artist}** — ×{sum(tx['count'] for tx in txs)}")
+            i = 0
+            shown = 0
+            while i < len(txs) and shown < 3:
+                tx = txs[i]
+                date_fmt = datetime.datetime.strptime(tx['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
+                count = 1
+                while i + count < len(txs) and txs[i + count]['purchase_price'] == tx['purchase_price']:
+                    count += 1
+                if count > 1:
+                    lines.append(f"  {date_fmt} x{count}")
+                else:
+                    lines.append(f"  {date_fmt}")
+                shown += count
+                i += count
+            remaining = len(txs) - i
+            if remaining > 0:
+                lines.append(f"  ...and {remaining} more")
 
         body = "\n".join(lines)
         embed = discord.Embed(
@@ -299,7 +285,7 @@ class TransactionPaginationView(discord.ui.View):
             date_fmt = datetime.datetime.strptime(row['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
             count = row.get('count', 1)
             count_str = f" x{count}" if count > 1 else ""
-            lines.append(f"**{row['artist_name']}**{count_str} — {date_fmt} — {row['purchase_price']} listeners")
+            lines.append(f"**{row['artist_name']}**{count_str} — {date_fmt} — {max(row['purchase_price'], 10)} pts")
 
         body = "\n".join(lines)
         embed = discord.Embed(
@@ -348,7 +334,7 @@ class StockCommands(commands.Cog):
             )
             return
 
-        last_claim = user_row['last_claim']
+        last_claim = int(user_row['last_claim'] or 0)
         now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
         if now_ts - last_claim < 86400:
             remaining = 86400 - (now_ts - last_claim)
@@ -370,7 +356,7 @@ class StockCommands(commands.Cog):
         await interaction.response.defer()
         logger.info("Fetching money for user: %s", interaction.user.name)
         try:
-            user = await get_lastfm_user(user_row['lastfm_username'])
+            user = await validate_lastfm_user(user_row['lastfm_username'])
         except Exception as e:
             logger.error("Failed to fetch Last.fm user %s: %s", user_row['lastfm_username'], e)
             await interaction.followup.send(
@@ -645,7 +631,7 @@ class StockCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else 0
         try:
             await validate_lastfm_user(lastfm_username)
-            insert_user(interaction.user.id, guild_id, interaction.user.name, lastfm_username)
+            insert_user(interaction.user.id, interaction.user.name, lastfm_username, guild_id=guild_id)
             await interaction.followup.send(f"{interaction.user.mention}, your Last.fm username has been set to {lastfm_username}.")
         except Exception as e:
             logger.error("Failed to validate Last.fm user %s: %s", lastfm_username, e)
@@ -718,7 +704,7 @@ class StockCommands(commands.Cog):
         await interaction.followup.send(embed=embed)
 
 
-    @app_commands.command(name="history", description="View an artist's listener history")
+    @app_commands.command(name="history", description="View an artist's velocity history")
     async def slash_history(self, interaction: discord.Interaction, artist_name: str):
         if not artist_name.strip() or len(artist_name) > 100:
             await interaction.response.send_message("Please provide a valid artist name.", ephemeral=True)
@@ -738,21 +724,21 @@ class StockCommands(commands.Cog):
                 return
 
             lines = []
-            prev_listeners = None
+            prev_daily_total = None
             for entry in history:
                 date_fmt = datetime.datetime.strptime(entry['date'], '%Y%m%d').strftime('%d/%m/%Y')
-                listeners = entry['listeners']
-                if prev_listeners is None:
+                daily_total = entry['daily_total']
+                if prev_daily_total is None:
                     trend = "➡️"
-                elif listeners > prev_listeners:
+                elif daily_total > prev_daily_total:
                     trend = "📈"
-                elif listeners < prev_listeners:
+                elif daily_total < prev_daily_total:
                     trend = "📉"
                 else:
                     trend = "➡️"
-                prev_listeners = listeners
-                value = listeners / 100_000
-                lines.append(f"{trend} {date_fmt}: {format_listeners(listeners)} listeners ({value:.2f}€)")
+                prev_daily_total = daily_total
+                value = daily_total / 100_000
+                lines.append(f"{trend} {date_fmt}: {format_daily_total(daily_total)} pts ({value:.2f}€)")
 
             body = "\n".join(lines)
             embed = discord.Embed(
@@ -812,7 +798,7 @@ class StockCommands(commands.Cog):
                 "**3.** Run `/portfolio` to see your holdings\n"
                 "**4.** Run `/check` to update stale data\n\n"
                 "**How to profit:**\n"
-                "• An artist's share price = their Last.fm listener count\n"
+                "• An artist's share price = their scrobble velocity\n"
                 "• When more people listen to an artist, the price goes up — your shares gain value\n"
                 "• The more scrobbles you have for an artist, the more shares you own\n"
                 "• Claim daily to keep accumulating shares\n"
@@ -858,20 +844,39 @@ class StockCommands(commands.Cog):
             if overview['gainers']:
                 lines = []
                 for entry in overview['gainers']:
+                    if entry.get('change_percent', 0) == 0:
+                        continue
                     lines.append(f"📈 **{entry['artist_name']}**: {entry['current_share_value']:.2f}€ ({entry['change_value']:+.2f}€ / {entry['change_percent']:+.2f}%)")
-                sections.append("**Top Gainers**\n" + "\n".join(lines))
+                if lines:
+                    sections.append("**Top Gainers**\n" + "\n".join(lines))
 
             if overview['losers']:
                 lines = []
                 for entry in overview['losers']:
+                    if entry.get('change_percent', 0) == 0:
+                        continue
                     lines.append(f"📉 **{entry['artist_name']}**: {entry['current_share_value']:.2f}€ ({entry['change_value']:+.2f}€ / {entry['change_percent']:+.2f}%)")
-                sections.append("**Top Losers**\n" + "\n".join(lines))
+                if lines:
+                    sections.append("**Top Losers**\n" + "\n".join(lines))
 
-            if period == "day" and overview['most_held']:
+            if overview['most_held']:
                 lines = []
                 for entry in overview['most_held']:
                     lines.append(f"🏦 **{entry['artist_name']}**: {entry['count']} shares")
                 sections.append("**Most Held**\n" + "\n".join(lines))
+
+            if not sections:
+                rankings = get_stock_rankings(limit=10)
+                if rankings['most_valuable']:
+                    lines = []
+                    for entry in rankings['most_valuable'][:5]:
+                        lines.append(f"📈 **{entry['artist_name']}**: {entry['current_share_value']:.2f}€")
+                    sections.append("**Most Valuable Stocks**\n" + "\n".join(lines))
+                if rankings['least_valuable']:
+                    lines = []
+                    for entry in rankings['least_valuable'][:5]:
+                        lines.append(f"📉 **{entry['artist_name']}**: {entry['current_share_value']:.2f}€")
+                    sections.append("**Least Valuable Stocks**\n" + "\n".join(lines))
 
             if not sections:
                 await interaction.followup.send("No market data available yet.")

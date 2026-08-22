@@ -2,8 +2,7 @@ import datetime
 import logging
 import os
 import shutil
-
-DB_PATH = 'db.sqlite3'
+from config import DB_PATH
 BACKUP_DIR = 'backups'
 RETENTION_DAYS = int(os.getenv('BACKUP_RETENTION_DAYS', '2'))
 logger = logging.getLogger('lastfm_bot')
