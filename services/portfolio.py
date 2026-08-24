@@ -91,7 +91,7 @@ def calculate_volatility_price(artist_name: str, today_str: str) -> int:
         return max(base_price, 1)
 
     user_scale = 0.2 + 0.8 * min(active_users, 10) / 10
-    dampened = math.sqrt(reference_count) * 1 * user_scale
+    dampened = math.sqrt(reference_count) * 0.2 * user_scale
     raw_price = BASE_SHARE_VALUE + dampened
     capped_price = _cap_daily_price(base_price, raw_price)
     return max(int(capped_price), 1)

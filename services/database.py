@@ -477,29 +477,32 @@ def get_price_changes(days: int | str = 1) -> list[dict]:
                 'SELECT artist_name, daily_total FROM artist_scrobbles WHERE scrobble_date = ?',
                 (past,)
             ).fetchall()
+
+        past_by_name = {row['artist_name']: row['daily_total'] for row in past_rows}
+        result = []
+        for row in today_rows:
+            artist_name = row['artist_name']
+            today_daily_total = row['daily_total']
+            past_daily_total = past_by_name.get(artist_name)
+            if past_daily_total is None:
+                past_snapshot = get_closest_snapshot(artist_name, (now_utc.date() - datetime.timedelta(days=days)).isoformat().replace('-', ''))
+                if past_snapshot is None:
+                    continue
+                past_daily_total = past_snapshot
+            capped_today = _cap_daily_price(past_daily_total, today_daily_total)
+            capped_today = max(capped_today, 1)
+            change = capped_today - past_daily_total
+            change_percent = (change / past_daily_total * 100) if past_daily_total > 0 else 0.0
+            result.append({
+                'artist_name': artist_name,
+                'today_daily_total': capped_today,
+                'past_daily_total': past_daily_total,
+                'change': change,
+                'change_percent': change_percent,
+            })
+        return result
     finally:
         conn.close()
-
-    past_by_name = {row['artist_name']: row['daily_total'] for row in past_rows}
-    result = []
-    for row in today_rows:
-        artist_name = row['artist_name']
-        today_daily_total = row['daily_total']
-        past_daily_total = past_by_name.get(artist_name)
-        if past_daily_total is None:
-            continue
-        capped_today = _cap_daily_price(past_daily_total, today_daily_total)
-        capped_today = max(capped_today, 1)
-        change = capped_today - past_daily_total
-        change_percent = (change / past_daily_total * 100) if past_daily_total > 0 else 0.0
-        result.append({
-            'artist_name': artist_name,
-            'today_daily_total': capped_today,
-            'past_daily_total': past_daily_total,
-            'change': change,
-            'change_percent': change_percent,
-        })
-    return result
 
 
 def get_most_held_artists(limit: int = 5, guild_id: int = 0) -> list[dict]:
