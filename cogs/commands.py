@@ -750,8 +750,7 @@ class StockCommands(commands.Cog):
                 else:
                     trend = "➡️"
                 prev_daily_total = daily_total
-                value = daily_total / 100_000
-                lines.append(f"{trend} {date_fmt}: {format_currency(value)}")
+                lines.append(f"{trend} {date_fmt}: {format_currency(daily_total)}")
 
             body = "\n".join(lines)
             embed = discord.Embed(

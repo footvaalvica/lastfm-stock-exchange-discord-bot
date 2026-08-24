@@ -452,6 +452,7 @@ def get_price_changes(days: int | str = 1) -> list[dict]:
     try:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         today = now_utc.date().isoformat().replace('-', '')
+        past_date_str = (now_utc.date() - datetime.timedelta(days=days if isinstance(days, int) else 1)).isoformat().replace('-', '')
 
         today_rows = conn.execute(
             'SELECT artist_name, daily_total FROM artist_scrobbles WHERE scrobble_date = ?',
@@ -476,34 +477,71 @@ def get_price_changes(days: int | str = 1) -> list[dict]:
                 (cutoff, today)
             ).fetchall()
         else:
-            past = (now_utc.date() - datetime.timedelta(days=days)).isoformat().replace('-', '')
             past_rows = conn.execute(
                 'SELECT artist_name, daily_total FROM artist_scrobbles WHERE scrobble_date = ?',
-                (past,)
+                (past_date_str,)
             ).fetchall()
 
         past_by_name = {row['artist_name']: row['daily_total'] for row in past_rows}
         result = []
-        for row in today_rows:
-            artist_name = row['artist_name']
-            today_daily_total = row['daily_total']
-            past_daily_total = past_by_name.get(artist_name)
+
+        def _resolve_change(artist_name: str, today_daily_total: int, past_daily_total: int | None) -> dict | None:
             if past_daily_total is None:
-                past_snapshot = get_closest_snapshot(artist_name, (now_utc.date() - datetime.timedelta(days=days)).isoformat().replace('-', ''))
+                past_snapshot = get_closest_snapshot(artist_name, past_date_str)
                 if past_snapshot is None:
-                    continue
+                    return None
                 past_daily_total = past_snapshot
+
+            from services.portfolio import BASE_SHARE_VALUE
+            total_snapshots = conn.execute(
+                'SELECT COUNT(*) as cnt FROM artist_scrobbles WHERE artist_name = ? COLLATE NOCASE',
+                (artist_name,)
+            ).fetchone()
+            if total_snapshots and total_snapshots['cnt'] == 1:
+                past_daily_total = BASE_SHARE_VALUE
+
             capped_today = _cap_daily_price(past_daily_total, today_daily_total)
             capped_today = max(capped_today, 1)
             change = capped_today - past_daily_total
             change_percent = (change / past_daily_total * 100) if past_daily_total > 0 else 0.0
-            result.append({
+            return {
                 'artist_name': artist_name,
                 'today_daily_total': capped_today,
                 'past_daily_total': past_daily_total,
                 'change': change,
                 'change_percent': change_percent,
-            })
+            }
+
+        for row in today_rows:
+            artist_name = row['artist_name']
+            entry = _resolve_change(artist_name, row['daily_total'], past_by_name.get(artist_name))
+            if entry:
+                result.append(entry)
+
+        all_artists = conn.execute('SELECT DISTINCT artist_name FROM artist_scrobbles').fetchall()
+        for artist_row in all_artists:
+            artist_name = artist_row['artist_name']
+            if any(r['artist_name'] == artist_name for r in result):
+                continue
+            latest = conn.execute(
+                '''SELECT daily_total, scrobble_date FROM artist_scrobbles
+                   WHERE artist_name = ? COLLATE NOCASE
+                   ORDER BY scrobble_date DESC LIMIT 1''',
+                (artist_name,)
+            ).fetchone()
+            if not latest:
+                continue
+            latest_date = datetime.datetime.strptime(latest['scrobble_date'], '%Y%m%d').date()
+            if days == 'alltime':
+                pass
+            elif isinstance(days, int):
+                cutoff = now_utc.date() - datetime.timedelta(days=days)
+                if latest_date < cutoff:
+                    continue
+            entry = _resolve_change(artist_name, latest['daily_total'], None)
+            if entry:
+                result.append(entry)
+
         return result
     finally:
         conn.close()
