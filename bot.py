@@ -97,9 +97,7 @@ async def send_market_summary():
             logger.error('Failed to refresh guild config cache: %s', e)
             return
 
-    if now_utc.minute != 0:
-        return
-
+    sent_any = False
     for config in _guild_config_cache:
         channel_id = config.get('market_channel_id')
         market_hour = config.get('market_hour_local')
@@ -119,6 +117,7 @@ async def send_market_summary():
 
         overview = get_market_overview(guild_id)
         if not overview['gainers'] and not overview['losers']:
+            logger.info('Skipping market summary for guild %s: no gainers/losers', guild_id)
             continue
 
         sections = []
@@ -144,12 +143,18 @@ async def send_market_summary():
 
         channel = bot.get_channel(channel_id)
         if not channel:
+            logger.warning('Market summary channel %s not found for guild %s', channel_id, guild_id)
             continue
 
         try:
             await channel.send(embed=embed)
+            sent_any = True
+            logger.info('Sent market summary to guild %s channel %s', guild_id, channel_id)
         except Exception as e:
-            logger.error('Failed to send market summary to channel %d: %s', channel_id, e)
+            logger.error('Failed to send market summary to channel %s: %s', channel_id, e)
+
+    if not sent_any:
+        logger.info('Market summary task ran but did not send any messages at %s', now_utc.isoformat())
 
 
 @tasks.loop(hours=1)
