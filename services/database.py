@@ -394,13 +394,17 @@ def upsert_snapshot(artist_name: str, daily_total: int, scrobble_date: str):
     conn = get_db()
     try:
         existing = conn.execute(
-            'SELECT artist_name FROM artist_scrobbles WHERE LOWER(artist_name) = LOWER(?)',
+            'SELECT artist_name, daily_total, scrobble_date FROM artist_scrobbles WHERE LOWER(artist_name) = LOWER(?)',
             (artist_name,)
-        ).fetchone()
-        canonical_name = existing['artist_name'] if existing else artist_name
+        ).fetchall()
+        if existing:
+            conn.execute(
+                'UPDATE artist_scrobbles SET artist_name = ? WHERE LOWER(artist_name) = LOWER(?)',
+                (artist_name, artist_name)
+            )
         conn.execute(
             'INSERT OR REPLACE INTO artist_scrobbles (artist_name, daily_total, scrobble_date) VALUES (?, ?, ?)',
-            (canonical_name, daily_total, scrobble_date)
+            (artist_name, daily_total, scrobble_date)
         )
         conn.commit()
     finally:

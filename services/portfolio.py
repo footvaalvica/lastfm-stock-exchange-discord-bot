@@ -10,7 +10,7 @@ from services.database import (
     get_snapshots_bulk, get_latest_snapshots_bulk, get_closest_snapshot_bulk,
     get_daily_scrobble_counts, _cap_daily_price, get_all_artists, upsert_snapshot
 )
-from services.lastfm import fetch_recent_tracks
+from services.lastfm import fetch_recent_tracks, get_canonical_artist_name
 
 
 class LastFMPrivacyError(Exception):
@@ -136,7 +136,7 @@ async def _get_artist_info_cached(artist_name: str, today_str: str) -> dict | No
             canonical_name = existing['artist_name']
             current_price = existing['daily_total']
         else:
-            canonical_name = artist_name
+            canonical_name = await get_canonical_artist_name(artist_name)
             effective_price = calculate_volatility_price(canonical_name, today_str)
             upsert_snapshot(canonical_name, effective_price, today_str)
             current_price = effective_price

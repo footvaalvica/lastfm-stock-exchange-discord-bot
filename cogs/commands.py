@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 from services.database import get_user, insert_user, update_last_preview, update_user_money, set_guild_config, get_transactions, add_user_to_guild
 from services.portfolio import process_user_claim, calculate_portfolio_value, get_portfolio_breakdown, BASE_SHARE_VALUE, get_artist_info, get_artist_price_history, get_market_overview, get_balance_stats, get_claim_multiplier, LastFMPrivacyError, get_stock_rankings
-from services.lastfm import validate_lastfm_user
+from services.lastfm import validate_lastfm_user, get_canonical_artist_name
 
 logger = logging.getLogger('lastfm_bot')
 
@@ -295,7 +295,7 @@ class TransactionPaginationView(discord.ui.View):
             date_fmt = datetime.datetime.strptime(row['scrobble_date'], '%Y%m%d').strftime('%d/%m/%Y')
             count = row.get('count', 1)
             count_str = f" x{count}" if count > 1 else ""
-            lines.append(f"**{row['artist_name']}**{count_str} — {date_fmt} — {max(row['purchase_price'], 10)} pts")
+            lines.append(f"**{row['artist_name']}**{count_str} — {date_fmt} — {max(row['purchase_price'], 10)}")
 
         body = "\n".join(lines)
         embed = discord.Embed(
@@ -680,7 +680,8 @@ class StockCommands(commands.Cog):
             return
         await interaction.response.defer()
         try:
-            info = await get_artist_info(artist_name, today_str)
+            canonical_name = await get_canonical_artist_name(artist_name)
+            info = await get_artist_info(canonical_name, today_str)
         except Exception as e:
             logger.error("Failed to fetch artist info for %s: %s", artist_name, e)
             await interaction.followup.send(
@@ -690,11 +691,12 @@ class StockCommands(commands.Cog):
             return
         if not info:
             await interaction.followup.send(
-                f"No data found for **{artist_name}**. It may not be tracked yet.",
+                f"No data found for **{canonical_name}**. It may not be tracked yet.",
                 ephemeral=True
             )
             return
 
+        display_name = info['artist_name']
         gain = info['gain_loss_percent']
         if gain > 0.5:
             emoji = "📈"
@@ -704,7 +706,7 @@ class StockCommands(commands.Cog):
             emoji = "➡️"
 
         embed = discord.Embed(
-            title=f"{info['artist_name']} {emoji}",
+            title=f"{display_name} {emoji}",
             color=discord.Color.blue()
         )
         embed.add_field(name="Value", value=f"{info['current_share_value']:.2f}€", inline=True)
@@ -728,9 +730,10 @@ class StockCommands(commands.Cog):
             return
         await interaction.response.defer()
         try:
-            history = get_artist_price_history(artist_name)
+            canonical_name = await get_canonical_artist_name(artist_name)
+            history = get_artist_price_history(canonical_name)
             if not history:
-                await interaction.followup.send(f"No price history found for **{artist_name}**.")
+                await interaction.followup.send(f"No price history found for **{canonical_name}**.")
                 return
 
             lines = []
@@ -748,11 +751,11 @@ class StockCommands(commands.Cog):
                     trend = "➡️"
                 prev_daily_total = daily_total
                 value = daily_total / 100_000
-                lines.append(f"{trend} {date_fmt}: {format_daily_total(daily_total)} pts ({value:.2f}€)")
+                lines.append(f"{trend} {date_fmt}: {format_currency(value)}")
 
             body = "\n".join(lines)
             embed = discord.Embed(
-                title=f"Price History: {history[-1].get('artist_name', artist_name)}",
+                title=f"Price History: {history[-1].get('artist_name', canonical_name)}",
                 description=body,
                 color=discord.Color.blue()
             )

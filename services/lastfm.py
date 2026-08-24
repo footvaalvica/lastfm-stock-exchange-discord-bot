@@ -83,4 +83,15 @@ async def validate_lastfm_user(lastfm_username: str):
     return await _fetch_with_retry(_fetch)
 
 
+async def get_canonical_artist_name(artist_name: str) -> str:
+    def _fetch():
+        return network.get_artist(artist_name)
+    try:
+        artist = await _fetch_with_retry(_fetch)
+        correction = artist.get_correction()
+        return correction or artist.name or artist_name
+    except Exception:
+        return artist_name
+
+
 

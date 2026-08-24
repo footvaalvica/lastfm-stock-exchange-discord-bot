@@ -153,10 +153,6 @@ async def send_market_summary():
         except Exception as e:
             logger.error('Failed to send market summary to channel %s: %s', channel_id, e)
 
-    if not sent_any:
-        logger.info('Market summary task ran but did not send any messages at %s', now_utc.isoformat())
-
-
 @tasks.loop(hours=1)
 async def daily_backup():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
