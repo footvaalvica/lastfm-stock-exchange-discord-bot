@@ -424,6 +424,9 @@ def upsert_snapshot(artist_name: str, daily_total: float, scrobble_date: str):
     finally:
         conn.close()
 
+    from services.portfolio import invalidate_artist_info_cache
+    invalidate_artist_info_cache(artist_name)
+
 
 def get_total_scrobbles_for_artist(artist_name: str) -> int:
     conn = get_db()

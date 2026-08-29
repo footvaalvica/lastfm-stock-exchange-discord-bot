@@ -61,6 +61,12 @@ def _get_active_user_count() -> int:
         conn.close()
 
 
+def _has_previous_snapshot(artist_name: str, today_str: str) -> bool:
+    today_date = datetime.date.fromisoformat(f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:8]}")
+    yesterday_str = (today_date - datetime.timedelta(days=1)).isoformat().replace('-', '')
+    return get_snapshot(artist_name, yesterday_str) is not None or get_latest_snapshot(artist_name) is not None
+
+
 def calculate_volatility_price(artist_name: str, today_str: str) -> float:
     history = get_artist_scrobble_history(artist_name, days=7, today_str=today_str)
     if not history:
@@ -90,18 +96,30 @@ def calculate_volatility_price(artist_name: str, today_str: str) -> float:
     user_counts = get_artist_scrobble_user_counts(artist_name, days=7, today_str=today_str)
     today_users = user_counts.get(today_str, 0)
 
-    if yesterday_count == 0 and today_count == 0:
-        return base_price * 0.95
+    is_first_claim = not _has_previous_snapshot(artist_name, today_str)
 
-    if yesterday_count == 0:
-        reference_count = BASE_SHARE_VALUE
+    if is_first_claim:
+        if today_count == 0:
+            return BASE_SHARE_VALUE
+
+        user_scale = 0.2 + 0.8 * min(_get_active_user_count(), 10) / 10
+        dampened = math.sqrt(today_count) * 0.1 * user_scale
+        raw_price = BASE_SHARE_VALUE + dampened
+        if today_users <= 1:
+            raw_price = min(raw_price, BASE_SHARE_VALUE * 1.05)
     else:
-        reference_count = max(yesterday_count, 1)
+        if yesterday_count == 0 and today_count == 0:
+            return base_price * 0.95
 
-    raw_price = base_price * (today_count / reference_count)
+        avg_count = sum(counts) / len(counts) if counts else BASE_SHARE_VALUE
+        reference_count = max(avg_count, 1)
 
-    if today_users <= 1:
-        raw_price = min(raw_price, base_price * 1.05)
+        base_change = (today_count / 200) * 50
+        user_multiplier = 1 + (today_users - 1) * 0.1
+        raw_price = base_price * (1 + base_change / 100 * user_multiplier)
+
+        if today_users <= 1 and today_count > 0:
+            raw_price = min(raw_price, base_price * 1.05)
 
     capped_price = _cap_daily_price(base_price, raw_price)
     return max(capped_price, 0.0)
@@ -112,6 +130,12 @@ _ARTIST_INFO_CACHE_MAX = 1000
 _artist_info_cache: dict[str, tuple[float, dict | None]] = {}
 _artist_info_locks: dict[str, asyncio.Lock] = {}
 _artist_info_cache_lock = asyncio.Lock()
+
+
+def invalidate_artist_info_cache(artist_name: str):
+    cache_key = artist_name.lower()
+    _artist_info_cache.pop(cache_key, None)
+    _artist_info_locks.pop(cache_key, None)
 
 
 async def _get_artist_info_cached(artist_name: str, today_str: str) -> dict | None:
@@ -156,7 +180,11 @@ async def _get_artist_info_cached(artist_name: str, today_str: str) -> dict | No
         today_date = datetime.date.fromisoformat(today_str)
         yesterday_str = (today_date - datetime.timedelta(days=1)).isoformat().replace('-', '')
         yesterday_snapshot = get_snapshot(canonical_name, yesterday_str)
-        base_price = yesterday_snapshot['daily_total'] if yesterday_snapshot else current_price
+        if yesterday_snapshot:
+            base_price = yesterday_snapshot['daily_total']
+        else:
+            latest = get_latest_snapshot(canonical_name)
+            base_price = latest if latest is not None else BASE_SHARE_VALUE
         capped_price = _cap_daily_price(base_price, current_price)
 
         gain_loss_percent = ((capped_price / base_price) - 1) * 100 if base_price > 0 else 0.0
@@ -390,12 +418,34 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> tuple[floa
         artist_today_prices[artist_name] = effective_price
         upsert_snapshot(canonical_name, effective_price, today_str)
 
+    _recalculate_affected_users(unique_artists, today_str, unix_scrobble_date)
+
     total_value, avg_gain_loss_percent = calculate_portfolio_value(discord_id, today_str)
     multiplier = get_claim_multiplier(discord_id)
     total_money = total_value * multiplier
     update_user_money_and_claim(discord_id, total_money, unix_scrobble_date)
 
     return total_money, avg_gain_loss_percent
+
+
+def _recalculate_affected_users(artist_names: list[str], today_str: str, unix_scrobble_date: int):
+    conn = get_db()
+    try:
+        placeholders = ','.join('?' for _ in artist_names)
+        rows = conn.execute(
+            f'''SELECT DISTINCT discord_id FROM scrobbles
+                WHERE artist_name IN ({placeholders}) COLLATE NOCASE''',
+            artist_names
+        ).fetchall()
+        discord_ids = [row['discord_id'] for row in rows]
+    finally:
+        conn.close()
+
+    for affected_id in discord_ids:
+        total_value, _ = calculate_portfolio_value(affected_id, today_str)
+        multiplier = get_claim_multiplier(affected_id)
+        total_money = total_value * multiplier
+        update_user_money_and_claim(affected_id, total_money, unix_scrobble_date)
 
 
 def get_portfolio_breakdown(discord_id: int, today_str: str) -> list[dict]:
