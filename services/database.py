@@ -438,13 +438,14 @@ def get_total_scrobbles_for_artist(artist_name: str) -> int:
 
 
 
-def get_artist_scrobble_history(artist_name: str, days: int = 7) -> list[tuple[str, int]]:
+def get_artist_scrobble_history(artist_name: str, days: int = 7, today_str: str | None = None) -> list[tuple[str, int]]:
     conn = get_db()
     try:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         cutoff_date = now_utc.date() - datetime.timedelta(days=days)
         cutoff = cutoff_date.isoformat().replace('-', '')
-        today_str = now_utc.date().isoformat().replace('-', '')
+        if today_str is None:
+            today_str = now_utc.date().isoformat().replace('-', '')
         rows = conn.execute(
             "SELECT scrobble_date, SUM(count) as total FROM scrobbles WHERE artist_name = ? COLLATE NOCASE AND scrobble_date >= ? AND scrobble_date <= ? GROUP BY scrobble_date ORDER BY scrobble_date ASC",
             (artist_name, cutoff, today_str)
@@ -461,13 +462,14 @@ def get_artist_scrobble_history(artist_name: str, days: int = 7) -> list[tuple[s
         conn.close()
 
 
-def get_artist_scrobble_user_counts(artist_name: str, days: int = 7) -> dict[str, int]:
+def get_artist_scrobble_user_counts(artist_name: str, days: int = 7, today_str: str | None = None) -> dict[str, int]:
     conn = get_db()
     try:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         cutoff_date = now_utc.date() - datetime.timedelta(days=days)
         cutoff = cutoff_date.isoformat().replace('-', '')
-        today_str = now_utc.date().isoformat().replace('-', '')
+        if today_str is None:
+            today_str = now_utc.date().isoformat().replace('-', '')
         rows = conn.execute(
             "SELECT scrobble_date, COUNT(DISTINCT discord_id) as user_count FROM scrobbles WHERE artist_name = ? COLLATE NOCASE AND scrobble_date >= ? AND scrobble_date <= ? GROUP BY scrobble_date ORDER BY scrobble_date ASC",
             (artist_name, cutoff, today_str)

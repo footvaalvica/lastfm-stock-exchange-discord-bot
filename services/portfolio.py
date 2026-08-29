@@ -62,7 +62,7 @@ def _get_active_user_count() -> int:
 
 
 def calculate_volatility_price(artist_name: str, today_str: str) -> float:
-    history = get_artist_scrobble_history(artist_name, days=7)
+    history = get_artist_scrobble_history(artist_name, days=7, today_str=today_str)
     if not history:
         return BASE_SHARE_VALUE
 
@@ -87,10 +87,7 @@ def calculate_volatility_price(artist_name: str, today_str: str) -> float:
     if get_total_scrobbles_for_artist(artist_name) == 0:
         return base_price
 
-    user_counts = get_artist_scrobble_user_counts(artist_name, days=7)
-    today_users = user_counts.get(today_str, 0)
-
-    user_counts = get_artist_scrobble_user_counts(artist_name, days=7)
+    user_counts = get_artist_scrobble_user_counts(artist_name, days=7, today_str=today_str)
     today_users = user_counts.get(today_str, 0)
 
     if yesterday_count == 0 and today_count == 0:
