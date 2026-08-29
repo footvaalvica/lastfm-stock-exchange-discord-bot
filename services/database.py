@@ -461,6 +461,22 @@ def get_artist_scrobble_history(artist_name: str, days: int = 7) -> list[tuple[s
         conn.close()
 
 
+def get_artist_scrobble_user_counts(artist_name: str, days: int = 7) -> dict[str, int]:
+    conn = get_db()
+    try:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        cutoff_date = now_utc.date() - datetime.timedelta(days=days)
+        cutoff = cutoff_date.isoformat().replace('-', '')
+        today_str = now_utc.date().isoformat().replace('-', '')
+        rows = conn.execute(
+            "SELECT scrobble_date, COUNT(DISTINCT discord_id) as user_count FROM scrobbles WHERE artist_name = ? COLLATE NOCASE AND scrobble_date >= ? AND scrobble_date <= ? GROUP BY scrobble_date ORDER BY scrobble_date ASC",
+            (artist_name, cutoff, today_str)
+        ).fetchall()
+        return {row['scrobble_date']: row['user_count'] for row in rows}
+    finally:
+        conn.close()
+
+
 def get_price_changes(days: int | str = 1) -> list[dict]:
     conn = get_db()
     try:

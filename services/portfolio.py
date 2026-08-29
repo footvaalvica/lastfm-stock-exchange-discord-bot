@@ -6,7 +6,7 @@ import pylast
 from services.database import (
     get_user, get_scrobbles, update_user_money_and_claim,
     get_snapshot, get_latest_snapshot, get_db,
-    get_total_scrobbles_for_artist, get_artist_scrobble_history, get_price_changes, get_most_held_artists,
+    get_total_scrobbles_for_artist, get_artist_scrobble_history, get_artist_scrobble_user_counts, get_price_changes, get_most_held_artists,
     get_snapshots_bulk, get_latest_snapshots_bulk, get_closest_snapshot_bulk,
     get_daily_scrobble_counts, _cap_daily_price, get_all_artists, upsert_snapshot
 )
@@ -84,13 +84,30 @@ def calculate_volatility_price(artist_name: str, today_str: str) -> float:
         if latest is not None:
             base_price = latest
 
-    user_scale = 0.2 + 0.8 * min(_get_active_user_count(), 10) / 10
-    dampened = math.sqrt(today_count) * 0.2 * user_scale
-    if today_count > 0:
-        dampened = max(dampened, 0.5)
-    raw_price = BASE_SHARE_VALUE + dampened
+    if get_total_scrobbles_for_artist(artist_name) == 0:
+        return base_price
+
+    user_counts = get_artist_scrobble_user_counts(artist_name, days=7)
+    today_users = user_counts.get(today_str, 0)
+
+    user_counts = get_artist_scrobble_user_counts(artist_name, days=7)
+    today_users = user_counts.get(today_str, 0)
+
+    if yesterday_count == 0 and today_count == 0:
+        return base_price * 0.95
+
+    if yesterday_count == 0:
+        reference_count = BASE_SHARE_VALUE
+    else:
+        reference_count = max(yesterday_count, 1)
+
+    raw_price = base_price * (today_count / reference_count)
+
+    if today_users <= 1:
+        raw_price = min(raw_price, base_price * 1.05)
+
     capped_price = _cap_daily_price(base_price, raw_price)
-    return max(capped_price, 1.0)
+    return max(capped_price, 0.0)
 
 
 _ARTIST_INFO_CACHE_TTL = 300
