@@ -29,6 +29,7 @@ _guild_config_cache: list[dict] = []
 _guild_config_cache_ts = 0
 GUILD_CONFIG_CACHE_TTL = 300
 _migration_ran = False
+_sent_market_dates: dict[int, str] = {}
 
 
 def invalidate_guild_config_cache():
@@ -87,9 +88,10 @@ if hasattr(signal, 'SIGTERM'):
 
 @tasks.loop(minutes=1)
 async def send_market_summary():
-    global _guild_config_cache, _guild_config_cache_ts
+    global _guild_config_cache, _guild_config_cache_ts, _sent_market_dates
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_ts = int(now_utc.timestamp())
+    today_str = now_utc.date().isoformat()
 
     if now_ts - _guild_config_cache_ts >= GUILD_CONFIG_CACHE_TTL:
         try:
@@ -99,7 +101,6 @@ async def send_market_summary():
             logger.error('Failed to refresh guild config cache: %s', e)
             return
 
-    sent_any = False
     for config in _guild_config_cache:
         channel_id = config.get('market_channel_id')
         market_hour = config.get('market_hour_local')
@@ -108,18 +109,22 @@ async def send_market_summary():
         if not channel_id or market_hour is None or guild_id is None:
             continue
 
+        if _sent_market_dates.get(guild_id) == today_str:
+            continue
+
         try:
             tz = datetime.timezone(datetime.timedelta(hours=int(market_timezone)))
             local_now = now_utc.astimezone(tz)
         except Exception:
             local_now = now_utc
 
-        if local_now.hour != market_hour or local_now.minute != 0:
+        if local_now.hour != market_hour:
             continue
 
         overview = get_market_overview(guild_id)
         if not overview['gainers'] and not overview['losers']:
             logger.info('Skipping market summary for guild %s: no gainers/losers', guild_id)
+            _sent_market_dates[guild_id] = today_str
             continue
 
         sections = []
@@ -150,7 +155,7 @@ async def send_market_summary():
 
         try:
             await channel.send(embed=embed)
-            sent_any = True
+            _sent_market_dates[guild_id] = today_str
             logger.info('Sent market summary to guild %s channel %s', guild_id, channel_id)
         except Exception as e:
             logger.error('Failed to send market summary to channel %s: %s', channel_id, e)
