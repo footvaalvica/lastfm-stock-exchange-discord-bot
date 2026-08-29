@@ -6,7 +6,7 @@ MAX_DAILY_CHANGE = 0.5
 VOLATILITY_MULTIPLIER = 1
 
 
-def _cap_daily_price(base_price: int, current_price: int, volatility_multiplier: float = VOLATILITY_MULTIPLIER) -> int:
+def _cap_daily_price(base_price: float, current_price: float, volatility_multiplier: float = VOLATILITY_MULTIPLIER) -> float:
     if base_price <= 0:
         return current_price
     raw_ratio = current_price / base_price
@@ -14,7 +14,7 @@ def _cap_daily_price(base_price: int, current_price: int, volatility_multiplier:
     scaled = centered * volatility_multiplier
     capped_scaled = max(-MAX_DAILY_CHANGE, min(scaled, MAX_DAILY_CHANGE))
     capped_ratio = 1.0 + capped_scaled
-    return int(base_price * capped_ratio)
+    return base_price * capped_ratio
 
 
 def get_db():
@@ -63,7 +63,7 @@ def init_db():
     conn.execute('''
         CREATE TABLE IF NOT EXISTS artist_scrobbles (
             artist_name TEXT NOT NULL,
-            daily_total INTEGER NOT NULL,
+            daily_total REAL NOT NULL,
             scrobble_date TEXT NOT NULL,
             PRIMARY KEY (artist_name, scrobble_date)
         )
@@ -352,7 +352,21 @@ def get_snapshot(artist_name: str, date_str: str):
         conn.close()
 
 
-def get_snapshots_bulk(artist_names: list[str], date_str: str) -> dict[str, int]:
+def get_latest_snapshot(artist_name: str):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            '''SELECT daily_total FROM artist_scrobbles
+               WHERE artist_name = ? COLLATE NOCASE
+               ORDER BY scrobble_date DESC LIMIT 1''',
+            (artist_name,)
+        ).fetchone()
+        return row['daily_total'] if row else None
+    finally:
+        conn.close()
+
+
+def get_snapshots_bulk(artist_names: list[str], date_str: str) -> dict[str, float]:
     if not artist_names:
         return {}
     conn = get_db()
@@ -367,7 +381,7 @@ def get_snapshots_bulk(artist_names: list[str], date_str: str) -> dict[str, int]
         conn.close()
 
 
-def get_latest_snapshots_bulk(artist_names: list[str]) -> dict[str, int]:
+def get_latest_snapshots_bulk(artist_names: list[str]) -> dict[str, float]:
     if not artist_names:
         return {}
     conn = get_db()
@@ -390,7 +404,7 @@ def get_latest_snapshots_bulk(artist_names: list[str]) -> dict[str, int]:
         conn.close()
 
 
-def upsert_snapshot(artist_name: str, daily_total: int, scrobble_date: str):
+def upsert_snapshot(artist_name: str, daily_total: float, scrobble_date: str):
     conn = get_db()
     try:
         existing = conn.execute(
@@ -432,12 +446,12 @@ def get_artist_scrobble_history(artist_name: str, days: int = 7) -> list[tuple[s
         cutoff = cutoff_date.isoformat().replace('-', '')
         today_str = now_utc.date().isoformat().replace('-', '')
         rows = conn.execute(
-            "SELECT scrobble_date, SUM(count) as total FROM scrobbles WHERE artist_name = ? COLLATE NOCASE AND scrobble_date >= ? AND scrobble_date < ? GROUP BY scrobble_date ORDER BY scrobble_date ASC",
+            "SELECT scrobble_date, SUM(count) as total FROM scrobbles WHERE artist_name = ? COLLATE NOCASE AND scrobble_date >= ? AND scrobble_date <= ? GROUP BY scrobble_date ORDER BY scrobble_date ASC",
             (artist_name, cutoff, today_str)
         ).fetchall()
         result = [(row['scrobble_date'], row['total']) for row in rows]
         dates_in_result = {d for d, _ in result}
-        for i in range(days):
+        for i in range(days + 1):
             d = (cutoff_date + datetime.timedelta(days=i)).isoformat().replace('-', '')
             if d not in dates_in_result:
                 result.append((d, 0))
@@ -632,6 +646,33 @@ def migrate_fix_zero_purchase_prices(base_value: int = 10):
             '''UPDATE scrobbles SET purchase_price = ? WHERE purchase_price IS NULL OR purchase_price <= 0''',
             (base_value,)
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def migrate_artist_scrobbles_to_float():
+    conn = get_db()
+    try:
+        cursor = conn.execute("PRAGMA table_info(artist_scrobbles)")
+        columns = cursor.fetchall()
+        has_real = any(col['name'] == 'daily_total' and col['type'].upper() == 'REAL' for col in columns)
+        if has_real:
+            return
+        conn.execute('ALTER TABLE artist_scrobbles RENAME TO artist_scrobbles_old')
+        conn.execute('''
+            CREATE TABLE artist_scrobbles (
+                artist_name TEXT NOT NULL,
+                daily_total REAL NOT NULL,
+                scrobble_date TEXT NOT NULL,
+                PRIMARY KEY (artist_name, scrobble_date)
+            )
+        ''')
+        conn.execute('''
+            INSERT INTO artist_scrobbles (artist_name, daily_total, scrobble_date)
+            SELECT artist_name, daily_total, scrobble_date FROM artist_scrobbles_old
+        ''')
+        conn.execute('DROP TABLE artist_scrobbles_old')
         conn.commit()
     finally:
         conn.close()

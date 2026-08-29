@@ -5,7 +5,7 @@ import asyncio
 import pylast
 from services.database import (
     get_user, get_scrobbles, update_user_money_and_claim,
-    get_snapshot, get_db,
+    get_snapshot, get_latest_snapshot, get_db,
     get_total_scrobbles_for_artist, get_artist_scrobble_history, get_price_changes, get_most_held_artists,
     get_snapshots_bulk, get_latest_snapshots_bulk, get_closest_snapshot_bulk,
     get_daily_scrobble_counts, _cap_daily_price, get_all_artists, upsert_snapshot
@@ -61,7 +61,7 @@ def _get_active_user_count() -> int:
         conn.close()
 
 
-def calculate_volatility_price(artist_name: str, today_str: str) -> int:
+def calculate_volatility_price(artist_name: str, today_str: str) -> float:
     history = get_artist_scrobble_history(artist_name, days=7)
     if not history:
         return BASE_SHARE_VALUE
@@ -75,26 +75,22 @@ def calculate_volatility_price(artist_name: str, today_str: str) -> int:
 
     today_count = history_by_date.get(today_str, 0)
     yesterday_count = history_by_date.get(yesterday_str, 0)
-    mean_7d = sum(counts) / len(counts)
-
-    if mean_7d < 5:
-        yesterday_snapshot = get_snapshot(artist_name, yesterday_str)
-        base_price = yesterday_snapshot['daily_total'] if yesterday_snapshot else BASE_SHARE_VALUE
-        return max(base_price, 1)
 
     yesterday_snapshot = get_snapshot(artist_name, yesterday_str)
     base_price = yesterday_snapshot['daily_total'] if yesterday_snapshot else BASE_SHARE_VALUE
 
-    reference_count = max(today_count, yesterday_count)
-    active_users = _get_active_user_count()
-    if active_users <= 1:
-        return max(base_price, 1)
+    if base_price == BASE_SHARE_VALUE:
+        latest = get_latest_snapshot(artist_name)
+        if latest is not None:
+            base_price = latest
 
-    user_scale = 0.2 + 0.8 * min(active_users, 10) / 10
-    dampened = math.sqrt(reference_count) * 0.2 * user_scale
+    user_scale = 0.2 + 0.8 * min(_get_active_user_count(), 10) / 10
+    dampened = math.sqrt(today_count) * 0.2 * user_scale
+    if today_count > 0:
+        dampened = max(dampened, 0.5)
     raw_price = BASE_SHARE_VALUE + dampened
     capped_price = _cap_daily_price(base_price, raw_price)
-    return max(int(capped_price), 1)
+    return max(capped_price, 1.0)
 
 
 _ARTIST_INFO_CACHE_TTL = 300
@@ -326,7 +322,8 @@ async def process_user_claim(user, discord_id: int, guild_id: int) -> tuple[floa
             int(scrobble.timestamp), datetime.timezone.utc
         ).date().isoformat().replace('-', '')
         artist_plays[artist_name] = artist_plays.get(artist_name, 0) + 1
-        artist_dates[artist_name] = scrobble_scrobble_date
+        if artist_name not in artist_dates or scrobble_scrobble_date > artist_dates[artist_name]:
+            artist_dates[artist_name] = scrobble_scrobble_date
 
     canonical_names: dict[str, str] = {}
     artist_purchase_prices: dict[str, int] = {}

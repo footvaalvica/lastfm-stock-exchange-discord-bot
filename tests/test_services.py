@@ -247,10 +247,10 @@ def test_get_price_changes(tmp_db):
     changes = get_price_changes(days=1)
     assert len(changes) == 2
     taylor = next(c for c in changes if c['artist_name'] == 'Taylor Swift')
-    assert taylor['change'] == 200000
+    assert taylor['change'] == pytest.approx(200000, abs=1e-3)
     assert taylor['change_percent'] == pytest.approx(1.3333, abs=1e-3)
     drake = next(c for c in changes if c['artist_name'] == 'Drake')
-    assert drake['change'] == -100000
+    assert drake['change'] == pytest.approx(-100000, abs=1e-3)
     assert drake['change_percent'] == pytest.approx(-0.8333, abs=1e-3)
 
 
@@ -760,10 +760,11 @@ def test_get_artist_scrobble_history(tmp_db):
     insert_scrobble(123456789, "Taylor Swift", 15000000, yesterday_str, count=15)
 
     history = get_artist_scrobble_history("Taylor Swift", days=3)
-    assert len(history) == 3
+    assert len(history) == 4
     assert history[0] == (three_days_ago_str, 5)
     assert history[1] == (two_days_ago_str, 10)
     assert history[2] == (yesterday_str, 15)
+    assert history[3] == (today_str, 0)
 
 
 def test_set_and_get_guild_config(tmp_db):
