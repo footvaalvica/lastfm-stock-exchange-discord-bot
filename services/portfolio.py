@@ -4,7 +4,7 @@ import time
 import asyncio
 import pylast
 from services.database import (
-    get_user, get_scrobbles, update_user_money_and_claim,
+    get_user, get_scrobbles, update_user_money_and_claim, update_user_money,
     get_snapshot, get_latest_snapshot, get_db,
     get_total_scrobbles_for_artist, get_artist_scrobble_history, get_artist_scrobble_user_counts, get_price_changes, get_most_held_artists,
     get_snapshots_bulk, get_latest_snapshots_bulk, get_closest_snapshot_bulk,
@@ -443,9 +443,8 @@ def _recalculate_affected_users(artist_names: list[str], today_str: str, unix_sc
 
     for affected_id in discord_ids:
         total_value, _ = calculate_portfolio_value(affected_id, today_str)
-        multiplier = get_claim_multiplier(affected_id)
-        total_money = total_value * multiplier
-        update_user_money_and_claim(affected_id, total_money, unix_scrobble_date)
+        total_money = total_value * get_claim_multiplier(affected_id)
+        update_user_money(affected_id, total_money)
 
 
 def get_portfolio_breakdown(discord_id: int, today_str: str) -> list[dict]:
